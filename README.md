@@ -1,9 +1,6 @@
 # embedding-recommender-api
 
-[
-
-![CI](https://github.com/WoodinGlass/embedding-recommender-api/actions/workflows/ci.yml/badge.svg)
-
+[![CI](https://github.com/WoodinGlass/embedding-recommender-api/actions/workflows/ci.yml/badge.svg)
 ](https://github.com/WoodinGlass/embedding-recommender-api/actions/workflows/ci.yml)
 
 
