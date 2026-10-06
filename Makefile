@@ -69,8 +69,12 @@ test-unit:  ## Unit tests only.
 	$(PY) -m pytest -q -m unit
 
 .PHONY: test-integration
-test-integration:  ## Integration tests only (requires RECSYS_TEST_* env).
-	$(PY) -m pytest -q -m integration
+test-integration:  ## Integration tests, light tier (postgres/redis). Skips encoder parity.
+	$(PY) -m pytest -q -m "integration and not encoder"
+
+.PHONY: test-encoder
+test-encoder:  ## Encoder parity tests. Requires the [inference,export] extra.
+	$(PY) -m pytest -q -m "integration and encoder"
 
 .PHONY: coverage
 coverage:  ## Unit tests with coverage report.

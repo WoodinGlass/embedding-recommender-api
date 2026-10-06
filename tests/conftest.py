@@ -31,6 +31,10 @@ def pytest_configure(config: pytest.Config) -> None:
     """
     config.addinivalue_line("markers", "unit: fast tests with no external services")
     config.addinivalue_line("markers", "integration: needs PostgreSQL (pgvector) and/or Redis")
+    config.addinivalue_line(
+        "markers",
+        "encoder: requires [inference,export] extras (onnxruntime + torch + sentence-transformers)",
+    )
     config.addinivalue_line("markers", "slow: takes more than a few seconds")
     config.addinivalue_line("markers", "load: Locust/k6 scenarios, run manually")
 

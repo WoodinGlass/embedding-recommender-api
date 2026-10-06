@@ -132,7 +132,42 @@ jobs:
           sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
           PGPASSWORD=recsys psql -h localhost -U recsys -d recsys -c "CREATE EXTENSION IF NOT EXISTS vector;"
       - name: Run integration tests
+        # Light tier: PostgreSQL (pgvector) and Redis only. Encoder parity
+        # runs in the dedicated `test-encoder` job because it needs torch
+        # and the HF hub, which are heavy and independent of the DB.
         run: make test-integration
+
+  # ---------------------------------------------------------------------------
+  # Encoder parity: ONNX artifact vs sentence-transformers reference
+  #
+  # Runs as a separate job so that the general integration job stays fast
+  # (no torch, no HF download) while the parity gate still executes on every
+  # push to main and every PR. The HF hub cache makes the second and later
+  # runs a few seconds instead of a minute.
+  # ---------------------------------------------------------------------------
+  test-encoder:
+    name: encoder parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Cache HuggingFace hub
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-all-MiniLM-L6-v2
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev-lite,inference,export]"
+      - name: Run encoder parity tests
+        run: make test-encoder
 
   # ---------------------------------------------------------------------------
   # Docker build + smoke test of /healthz

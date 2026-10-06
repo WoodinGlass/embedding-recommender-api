@@ -29,7 +29,7 @@ from recsys.embeddings.encoder import OnnxEncoder, ReferenceEncoder, sha256_file
 from recsys.embeddings.onnx_export import export
 from recsys.embeddings.preprocess import CatalogItem, preprocess_item
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.encoder]
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"

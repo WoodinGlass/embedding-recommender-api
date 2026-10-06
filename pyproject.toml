@@ -240,6 +240,7 @@ addopts = "-ra --strict-markers --strict-config"
 markers = [
   "unit: fast, no external services (default)",
   "integration: requires PostgreSQL (pgvector) and/or Redis",
+  "encoder: requires [inference,export] extras (onnxruntime + torch + sentence-transformers)",
   "slow: takes more than a few seconds",
   "load: Locust/k6 load test scenarios",
 ]
