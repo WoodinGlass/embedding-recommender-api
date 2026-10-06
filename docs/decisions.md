@@ -65,8 +65,14 @@ Two modes, both deliberate. Choosing "both" means we must know exactly when each
 
 | Mode | Trigger | Scope | Where it runs |
 |---|---|---|---|
-| **Batch** | Model upgrade, catalog re-import, scheduled weekly | Whole catalog | Prefect/Airflow flow in `pipelines/`; writes a new `model_version` + `index_version` |
-| **Incremental** | Item insert or update (content hash changed) | Single item | Same flow, invoked per item or in small micro-batches; writes into the *current* index version |
+| **Batch** | Model upgrade, catalog re-import, scheduled weekly | Whole catalog | `python -m recsys.embeddings.pipeline --mode=batch`; writes a new `model_version` + `catalog_snapshot` artifact set |
+| **Incremental** | Item insert or update (content hash changed) | New or changed items | `python -m recsys.embeddings.pipeline --mode=incremental`; produces an updated artifact set alongside the previous one |
+
+Orchestration (Prefect, Airflow, or a cron wrapper) is deferred to M6 and will
+wrap the CLI rather than replace it — see
+[`docs/adr/0003-plain-python-cli-for-embedding-pipeline.md`](adr/0003-plain-python-cli-for-embedding-pipeline.md).
+The artifact formats and the determinism contract are in
+[`docs/embedding-pipeline.md`](embedding-pipeline.md).
 
 **Not used:** streaming (Kafka/Kinesis). Events are appended via `POST /v1/events` into PostgreSQL; they are not consumed as a stream. Adding a stream later is a new ADR.
 

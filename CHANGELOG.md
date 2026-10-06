@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `docs/adr/0003-plain-python-cli-for-embedding-pipeline.md`: the M1
+  pipeline ships as a plain Python CLI; orchestration is deferred to M6 and
+  will wrap the CLI, not replace it. (M1.0)
+- `docs/embedding-pipeline.md`: M1 design doc — input/output contracts,
+  `model_version` and `catalog_snapshot` formats, preprocessing rules, storage
+  layout, batch/incremental modes, the three-tier determinism contract
+  (strict byte-identical in CI, top-k identical everywhere, cosine tolerance
+  locally), sample catalog and golden set, ONNX export lifecycle, and CLI
+  contract. (M1.0)
+- `docs/contracts.md` § 1.3: embedding artifact formats (`model_version`,
+  `catalog_snapshot`, filenames) and the three-tier determinism contract.
+  (M1.0)
 - `docs/decisions.md`: pre-flight design decisions locked before feature work —
   problem statement, payload vs pipeline split, deterministic/non-deterministic
   idempotency keys, storage tiers, ingestion modes, failure modes, and the

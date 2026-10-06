@@ -31,3 +31,4 @@ Per `docs/contracts.md` § 6 (Change management):
 |---|---|---|
 | [0001](0001-pgvector-as-default.md) | pgvector as the default vector store | Accepted |
 | [0002](0002-onnx-runtime-for-inference.md) | ONNX Runtime for embedding inference | Accepted |
+| [0003](0003-plain-python-cli-for-embedding-pipeline.md) | Plain Python CLI for the embedding pipeline | Accepted |

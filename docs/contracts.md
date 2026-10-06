@@ -32,7 +32,7 @@ before it can appear in a query, a cache key, a metric label, or a log field.
 
 ---
 
-## 1. Data contracts — ingest
+## 1. Data contracts
 
 ### 1.1 `EventEnvelope` (`POST /v1/events`)
 
@@ -108,6 +108,66 @@ class EventEnvelope(BaseModel):
 ### 1.2 `RecommendRequest` / `RecommendResponse`
 
 See § 2.1.
+
+### 1.3 Embedding artifacts (M1)
+
+The embedding pipeline produces versioned artifacts on disk. Their names and
+formats are contracts: anything that reads or writes them must conform. See
+[`docs/embedding-pipeline.md`](embedding-pipeline.md) for the design and
+rationale.
+
+**`model_version`** — string, format `<label>+<sha8>`:
+minilm-onnx-v1+a3f9e021
+
+
+- `<label>` is a human-readable tag chosen by the operator.
+- `<sha8>` is the first 8 hex characters of the SHA256 of the ONNX artifact
+  bytes.
+- The full 64-character SHA256 is recorded in the artifact manifest; only
+  the 8-character prefix appears in `model_version` strings.
+- Two artifacts with the same `<sha8>` are byte-identical. Two artifacts with
+  different `<sha8>` are different models regardless of `<label>`.
+
+**`catalog_snapshot`** — string, format `sha256:<16 hex>`:
+sha256:9f1e2c8a3b5d7e4f
+
+
+Computed as `sha256("\n".join(f"{item_id}:{content_hash}" for sorted items))`,
+truncated to 16 hex characters. Properties:
+
+- Row order in the source catalog does not affect the snapshot.
+- A content change on any item (which changes its `content_hash`) changes
+  the snapshot.
+- Adding or removing items changes the snapshot.
+- Two catalog exports with the same snapshot are semantically identical for
+  embedding purposes.
+
+**`content_hash` per item** — SHA256 of the preprocessed text (see
+`docs/embedding-pipeline.md` § 4), truncated to 16 hex characters. Stored as
+a column in the Parquet so incremental runs can decide "changed / unchanged"
+without re-reading the raw catalog.
+
+**Artifact filenames**:
+artifacts/embeddings/<model_version>/<catalog_snapshot>.parquet
+artifacts/embeddings/<model_version>/<catalog_snapshot>.manifest.json
+artifacts/embeddings/<model_version>/<catalog_snapshot>.checksums.json
+artifacts/onnx/<model_slug>/model.onnx
+artifacts/onnx/<model_slug>/model.onnx.sha256
+
+
+`model_slug` is the model name with `/` replaced by `__` and other
+filesystem-hostile characters removed; e.g.
+`sentence-transformers/all-MiniLM-L6-v2` →
+`sentence-transformers__all-MiniLM-L6-v2`.
+
+**Determinism contract** — three tiers. Full rationale in
+`docs/embedding-pipeline.md` § 5.
+
+| Tier | Assertion | Runs where |
+|---|---|---|
+| Strict | SHA256 of `*.parquet` matches between two consecutive runs in the same environment | CI only |
+| Semantic | Top-k (k=10) neighbours for a fixed probe set are identical — same item IDs, same order, ties broken by `item_id` ascending | CI and local |
+| Tolerance | Per-row cosine similarity ≥ 0.9999 between two runs | Local only |
 
 ---
 
