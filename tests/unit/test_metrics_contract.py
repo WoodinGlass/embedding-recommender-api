@@ -11,9 +11,7 @@ import pytest
 
 from recsys.monitoring import metrics
 
-CONTRACTS_PATH = (
-    pathlib.Path(__file__).resolve().parents[2] / "docs" / "contracts.md"
-)
+CONTRACTS_PATH = pathlib.Path(__file__).resolve().parents[2] / "docs" / "contracts.md"
 
 
 def test_contracts_file_exists() -> None:

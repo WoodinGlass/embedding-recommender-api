@@ -37,9 +37,7 @@ def test_pgvector_extension_available(integration_db_url: str) -> None:
         psycopg.connect(integration_db_url, connect_timeout=5) as conn,
         conn.cursor() as cur,
     ):
-        cur.execute(
-            "SELECT extname FROM pg_extension WHERE extname = 'vector'"
-        )
+        cur.execute("SELECT extname FROM pg_extension WHERE extname = 'vector'")
         row = cur.fetchone()
     assert row == ("vector",), (
         "pgvector extension not found; use image pgvector/pgvector:pg16 or "

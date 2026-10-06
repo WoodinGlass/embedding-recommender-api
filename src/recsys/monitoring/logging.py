@@ -42,9 +42,7 @@ def configure_logging(settings: Settings) -> None:
     if settings.log_format is LogFormat.JSON:
         renderer: structlog.typing.Processor = structlog.processors.JSONRenderer()
     else:
-        renderer = structlog.dev.ConsoleRenderer(
-            colors=settings.app_env is AppEnv.DEV
-        )
+        renderer = structlog.dev.ConsoleRenderer(colors=settings.app_env is AppEnv.DEV)
 
     structlog.configure(
         processors=[*shared_processors, renderer],

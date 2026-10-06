@@ -14,7 +14,17 @@ REGISTRY = CollectorRegistry(auto_describe=True)
 
 # Buckets include 0.2 s so the p95 < 200 ms target is directly measurable.
 _LATENCY_BUCKETS = (
-    0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0, 2.0, 5.0,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    1.0,
+    2.0,
+    5.0,
 )
 
 REQUEST_DURATION = Histogram(

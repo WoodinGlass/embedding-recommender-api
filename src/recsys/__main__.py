@@ -19,8 +19,8 @@ def main() -> None:
         # limiting are enforced by middleware, not by the bind address.
         host="0.0.0.0",  # noqa: S104
         port=8000,
-        log_config=None,    # structlog handles formatting
-        access_log=False,   # AccessLogMiddleware emits our structured line
+        log_config=None,  # structlog handles formatting
+        access_log=False,  # AccessLogMiddleware emits our structured line
         reload=False,
     )
 

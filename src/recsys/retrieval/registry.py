@@ -21,9 +21,7 @@ BackendFactory = Callable[[], IndexBackend]
 
 
 def _pgvector_factory() -> IndexBackend:
-    raise NotImplementedError(
-        "pgvector backend lands in M2 (Retrieval and offline evaluation)."
-    )
+    raise NotImplementedError("pgvector backend lands in M2 (Retrieval and offline evaluation).")
 
 
 def _faiss_factory() -> IndexBackend:
@@ -33,9 +31,7 @@ def _faiss_factory() -> IndexBackend:
             "INDEX_BACKEND=faiss requires the 'bench' extra. "
             "Install with: pip install -e '.[bench]'"
         )
-    raise NotImplementedError(
-        "FAISS backend lands in M2 (Retrieval and offline evaluation)."
-    )
+    raise NotImplementedError("FAISS backend lands in M2 (Retrieval and offline evaluation).")
 
 
 _REGISTRY: dict[IndexBackendEnum, BackendFactory] = {
@@ -44,9 +40,7 @@ _REGISTRY: dict[IndexBackendEnum, BackendFactory] = {
 }
 
 
-def register_backend(
-    backend: IndexBackendEnum, factory: BackendFactory
-) -> None:
+def register_backend(backend: IndexBackendEnum, factory: BackendFactory) -> None:
     """Register or override a backend factory."""
     _REGISTRY[backend] = factory
 

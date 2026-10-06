@@ -40,8 +40,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Starlette wraps middleware in reverse order of `add_middleware` calls:
     # the last added is the outermost. RequestContext must run first so the
     # access log can read `request.state.request_id`.
-    app.add_middleware(AccessLogMiddleware)          # inner
-    app.add_middleware(RequestContextMiddleware)     # outer
+    app.add_middleware(AccessLogMiddleware)  # inner
+    app.add_middleware(RequestContextMiddleware)  # outer
 
     app.include_router(health.router)
     app.include_router(metrics.router)

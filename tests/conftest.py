@@ -29,18 +29,10 @@ def pytest_configure(config: pytest.Config) -> None:
     with an alternate rootdir (e.g. a single test file by path), the ini file
     may not be picked up and markers would be rejected as unknown.
     """
-    config.addinivalue_line(
-        "markers", "unit: fast tests with no external services"
-    )
-    config.addinivalue_line(
-        "markers", "integration: needs PostgreSQL (pgvector) and/or Redis"
-    )
-    config.addinivalue_line(
-        "markers", "slow: takes more than a few seconds"
-    )
-    config.addinivalue_line(
-        "markers", "load: Locust/k6 scenarios, run manually"
-    )
+    config.addinivalue_line("markers", "unit: fast tests with no external services")
+    config.addinivalue_line("markers", "integration: needs PostgreSQL (pgvector) and/or Redis")
+    config.addinivalue_line("markers", "slow: takes more than a few seconds")
+    config.addinivalue_line("markers", "load: Locust/k6 scenarios, run manually")
 
 
 # ---------------------------------------------------------------------------
@@ -49,9 +41,7 @@ def pytest_configure(config: pytest.Config) -> None:
 # NOTE: pluggy matches hook arguments by name against the hookspec, so the
 # parameter must be called `config` — an underscore prefix breaks registration.
 # ARG001 (unused `config`) is already ignored for tests/** in pyproject.toml.
-def pytest_collection_modifyitems(
-    config: pytest.Config, items: list[pytest.Item]
-) -> None:
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Apply tier markers based on directory.
 
     Keeps every test file free of ``@pytest.mark.unit`` boilerplate while
@@ -80,9 +70,7 @@ def integration_db_url() -> str:
     """
     url = os.environ.get("RECSYS_TEST_DATABASE_URL")
     if not url:
-        pytest.skip(
-            "set RECSYS_TEST_DATABASE_URL to run database integration tests"
-        )
+        pytest.skip("set RECSYS_TEST_DATABASE_URL to run database integration tests")
     return url
 
 
