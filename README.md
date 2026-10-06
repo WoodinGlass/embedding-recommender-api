@@ -1,21 +1,12 @@
 # embedding-recommender-api
 
-[![CI](https://github.com/WoodinGlass/embedding-recommender-api/actions/workflows/ci.yml/badge.svg)
-](https://github.com/WoodinGlass/embedding-recommender-api/actions/workflows/ci.yml)
-
-
+[![CI](https://github.com/WoodinGlass/embedding-recommender-api/actions/workflows/ci.yml/badge.svg)](https://github.com/WoodinGlass/embedding-recommender-api/actions/workflows/ci.yml)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
-
-
-
-
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-
-
 
 Embedding-based recommendation service with low-latency ANN retrieval (target p95 < 200 ms), re-ranking, statistically valid A/B testing, monitoring, and automated deployment (Docker + CI/CD). It ships with offline evaluation, model/index versioning, fallbacks, and a churn-risk extension.
 
-> **Status:** in development. Progress is tracked in [Milestones](#milestones). Performance figures are targets until the M4 benchmark is published.
+> **Status:** in development. M0 (Foundation) is complete; see [Milestones](#milestones). Performance figures are targets until the M4 benchmark is published.
 
 ## What this is / is not
 
@@ -115,36 +106,40 @@ embedding-recommender-api/
 ├── migrations/             # Alembic
 ├── data/                   # samples only; real data via DVC
 ├── tests/
-│   ├── unit/
-│   ├── integration/
-│   └── load/
+│   ├── unit/               # fast, no external services
+│   ├── integration/        # real PostgreSQL (pgvector) and Redis
+│   └── load/               # Locust / k6 scenarios
 ├── deploy/
 │   ├── docker/
 │   ├── k8s/
 │   └── terraform/
 ├── dashboards/             # Grafana JSON
 ├── docs/
-│   ├── adr/                # architecture decision records, e.g. 0001-pgvector-default.md
-│   ├── runbook.md
-│   └── api.md
+│   ├── decisions.md        # pre-flight design decisions (locked)
+│   ├── contracts.md        # data, API, config, and telemetry contracts
+│   ├── runbook.md          # incident response procedures
+│   ├── api.md              # API summary (planned)
+│   └── adr/                # architecture decision records
 ├── .github/
-│   ├── workflows/          # ci.yml, cd.yml, security.yml
-│   └── dependabot.yml
+│   ├── workflows/          # ci.yml (cd.yml, security.yml planned)
+│   └── dependabot.yml      # planned
 ├── .env.example
 ├── .pre-commit-config.yaml
+├── .dockerignore
 ├── pyproject.toml
 ├── Dockerfile
 ├── docker-compose.yml
 ├── Makefile
+├── CHANGELOG.md
 └── LICENSE
 ```
 
 ## Quickstart
 
-Prerequisites: Docker with Compose v2, GNU Make, and Python 3.11 (for local development).
+Prerequisites: Docker with Compose v2, GNU Make, and Python 3.11+ (for local development).
 
 ```bash
-git clone https://github.com/<your-username>/embedding-recommender-api.git
+git clone https://github.com/WoodinGlass/embedding-recommender-api.git
 cd embedding-recommender-api
 
 cp .env.example .env       # set API keys and database credentials
@@ -167,7 +162,7 @@ Local endpoints: API docs at `http://localhost:8000/docs`, Prometheus on `:9090`
 
 ## Configuration
 
-Settings are read from environment variables (see `.env.example`). Never commit real secrets; `.env` is git-ignored.
+Settings are read from environment variables (see `.env.example`). Never commit real secrets; `.env` is git-ignored. The full config contract — enum values, allowed ranges, and the prod-mode startup guards — lives in [`docs/contracts.md`](docs/contracts.md) § 3.
 
 | Variable | Description | Example |
 |---|---|---|
@@ -221,7 +216,7 @@ Errors: `401`/`403` for auth, `422` for validation, `429` with `Retry-After` whe
 
 - **Batch and incremental runs.** Every item carries a content hash. Incremental runs embed only new or changed items; batch runs re-embed the whole catalog, for example after a model upgrade.
 - **Versioning.** Each run records `model_version`, `catalog_snapshot`, and `index_version` in the registry (DVC or MLflow). Embeddings and indexes are written as new versions, never overwritten in place.
-- **Deterministic by design.** Pinned model version, fixed text preprocessing, stable item ordering, and fixed batch/thread settings: the same catalog snapshot and model version produce the same embeddings (checksum-verified).
+- **Deterministic by design.** Pinned model version, fixed text preprocessing, stable item ordering, and fixed batch/thread settings: the same catalog snapshot and model version produce the same embeddings (checksum-verified). See [`docs/decisions.md`](docs/decisions.md) § 3 for the full determinism contract.
 - **Blue/green index swap.** A new index version is built next to the live one, evaluated against the golden set, warmed up, and then promoted by switching the active-version pointer. API instances pick up the new pointer without a restart, and the previous version is kept for instant rollback.
 
 ```bash
@@ -281,6 +276,8 @@ python -m recsys.experiments.analyze --experiment rerank_mmr
 - **Alerts.** p95 > 200 ms for 10 minutes; 5xx rate > 1% for 5 minutes; sustained fallback-rate spike; sharp drop in cache hit rate; drift score above threshold; SRM detected in a running experiment.
 - **Dashboards.** Grafana JSON in `dashboards/` (service health, cache and fallback, drift, experiments).
 
+The full metric and log-field contract — including cardinality guardrails and forbidden log fields — lives in [`docs/contracts.md`](docs/contracts.md) § 4.
+
 ## Performance targets and results
 
 **Target:** p95 < 200 ms on 100k+ items at the target RPS (fixed in M4).
@@ -315,11 +312,11 @@ A separate router (`/v1/churn/*`) and package (`recsys.churn`) built on the same
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `ci.yml` | Pull request, push to `main` | Ruff, mypy, unit and integration tests (PostgreSQL with pgvector and Redis service containers), offline evaluation gate, Docker build |
-| `cd.yml` | Push to `main` | Build and push the image (tagged with the git SHA), deploy to staging, run smoke tests and the eval gate, promote to production after approval, auto-rollback if readiness or SLO checks fail |
-| `security.yml` | Pull request, nightly | Trivy scans (filesystem and image), dependency review |
+| `ci.yml` | Pull request, push to `main` | Ruff, mypy, test-marker discipline, unit tests (matrix on 3.11 and 3.12), integration tests against PostgreSQL (pgvector) and Redis service containers, Docker build and smoke test of `/healthz`, `/readyz`, `/metrics` |
+| `cd.yml` | Push to `main` | Build and push the image (tagged with the git SHA), deploy to staging, run smoke tests and the eval gate, promote to production after approval, auto-rollback if readiness or SLO checks fail *(planned)* |
+| `security.yml` | Pull request, nightly | Trivy scans (filesystem and image), dependency review *(planned)* |
 
-- **Image.** Multi-stage, non-root Docker image. `docker-compose.yml` is for local development only.
+- **Image.** Multi-stage Dockerfile; builder installs into a virtualenv, runtime copies only the virtualenv and runs as uid 1000 `recsys`. `docker-compose.yml` is for local development only.
 - **Orchestration.** Rolling updates with readiness probes (`deploy/k8s`). Terraform (`deploy/terraform`) is optional.
 - **Rollback.** Code rollback redeploys the previous image tag. Index rollback is independent (`make index-rollback`).
 - **Dependencies.** Dependabot is configured in `.github/dependabot.yml`.
@@ -335,31 +332,49 @@ A separate router (`/v1/churn/*`) and package (`recsys.churn`) built on the same
 
 ## Development and testing
 
+Requires Python 3.11+ and GNU Make. Docker is optional and only needed for the full local stack.
+
 ```bash
-pip install -e ".[dev]"   # dev dependencies from pyproject.toml
-pre-commit install        # Ruff and mypy run on every commit
+make install-dev          # pip install -e ".[dev]" — the full local environment
+make install-hooks        # pre-commit install --install-hooks
+make check                # lint + typecheck + check-markers + unit tests
 ```
+
+Two extras are provided so CI and local development do not pay for what they
+do not use:
+
+| Extra | Contents | When to use |
+|---|---|---|
+| `[dev-lite]` | API + observability + test/quality tooling. **No torch.** | CI lint and unit jobs; fast local iteration. |
+| `[dev]` | Superset of `[dev-lite]` plus embeddings, experiments, churn, bench, and load. | Full local development once M1+ touches the encoder. |
 
 | Command | What it does |
 |---|---|
-| `make up` / `make down` | Start / stop the full local stack |
-| `make migrate` | Apply Alembic migrations |
-| `make seed` | Load the sample catalog (`make seed-synthetic N=100000` generates a synthetic one) |
-| `make embed` | Run the embedding pipeline and build a new index version |
-| `make index-promote VERSION=<v>` | Switch the active index; `make index-rollback` reverts |
-| `make eval` | Offline evaluation with threshold gate |
-| `make lint` / `make typecheck` | Ruff / mypy |
-| `make test` | Unit and integration tests |
-| `make load-test` | Locust load test against the local stack |
-| `make ab-simulate` | Simulated A/A and A/B experiments with known effects |
+| `make up` / `make down` | Start / stop the full local stack (Docker Compose) |
+| `make fmt` | Ruff auto-fix and format |
+| `make lint` | Ruff check and format-check, no modifications |
+| `make typecheck` | mypy in strict mode |
+| `make check-markers` | Enforce test-tier discipline (unit tests must not require external services) |
+| `make test` | Unit + integration tests (integration skips without `RECSYS_TEST_*` env) |
+| `make test-unit` | Unit tests only |
+| `make test-integration` | Integration tests only |
+| `make coverage` | Unit tests with coverage report |
+| `make clean` | Remove caches and build artifacts |
+| `make migrate` | Apply Alembic migrations *(planned)* |
+| `make seed` | Load the sample catalog; `make seed-synthetic N=100000` generates one *(planned)* |
+| `make embed` | Run the embedding pipeline and build a new index version *(planned)* |
+| `make index-promote VERSION=<v>` | Switch the active index; `make index-rollback` reverts *(planned)* |
+| `make eval` | Offline evaluation with threshold gate *(planned)* |
+| `make load-test` | Locust load test against the local stack *(planned)* |
+| `make ab-simulate` | Simulated A/A and A/B experiments with known effects *(planned)* |
 
 Test layers:
 
 - `tests/unit` covers pure logic: assignment hashing, statistics, re-ranking, and fallback selection.
-- `tests/integration` runs the API against real PostgreSQL (pgvector) and Redis, including failure paths such as Redis down or index unavailable.
+- `tests/integration` runs the API against real PostgreSQL (pgvector) and Redis, including failure paths such as Redis down or index unavailable. These skip cleanly unless `RECSYS_TEST_DATABASE_URL` and `RECSYS_TEST_REDIS_URL` are set.
 - `tests/load` holds the Locust (or k6) scenarios for the latency target.
 
-Pull requests must pass CI. Architectural changes need an ADR in `docs/adr/`.
+Pull requests must pass CI. Architectural changes need an ADR in `docs/adr/` — see the [ADR index](docs/adr/README.md) for the convention and the two accepted records (pgvector as default, ONNX Runtime for inference).
 
 ## Design decisions and trade-offs
 
@@ -374,11 +389,15 @@ Pull requests must pass CI. Architectural changes need an ADR in `docs/adr/`.
 | Blue/green indexes | Zero downtime and instant rollback | Roughly double the index storage during a swap |
 | Offline evaluation as a CI gate | Catches regressions before deploy | Offline metrics do not guarantee online lift, which is why A/B testing exists |
 
+For the full reasoning behind these choices — including the alternatives that
+were considered and rejected — see `docs/adr/0001-pgvector-as-default.md` and
+`docs/adr/0002-onnx-runtime-for-inference.md`.
+
 ## Milestones
 
 | # | Milestone | Scope | Exit criteria | Status |
 |---|---|---|---|---|
-| M0 | Foundation | Repo, CI (lint, type check, test), Docker, pre-commit, first ADR | CI is green on the scaffold and `make up` serves `/healthz` | Planned |
+| M0 | Foundation | Repo, CI (lint, type check, test), Docker, pre-commit, first ADR | CI is green on the scaffold; the `docker-build` job builds the image and serves `/healthz`, `/readyz`, and `/metrics` in a container | Done |
 | M1 | Embedding pipeline | Batch and incremental embedding, model/index versioning, golden set | Re-running the pipeline produces identical results | Planned |
 | M2 | Retrieval and offline evaluation | pgvector HNSW, benchmark vs FAISS, Recall@k / NDCG / MRR | Metrics are documented and enforced as a CI gate | Planned |
 | M3 | Production API | Auth, rate limiting, caching, fallback, health checks | Integration tests are green | Planned |
@@ -387,6 +406,12 @@ Pull requests must pass CI. Architectural changes need an ADR in `docs/adr/`.
 | M6 | Deployment | Automated CD, staging to prod, rollback, blue/green index | A merge to `main` reaches staging automatically; production promotion, rollback, and index swap are demonstrated with no downtime | Planned |
 | M7 | Churn extension | Features, model, endpoint, drift monitoring | Endpoint serves scores; AUC and calibration documented; drift monitored | Planned |
 | M8 | Hardening | Security scan, runbook, simulated postmortem, final README | No unaddressed high/critical findings; runbook and postmortem published; README documents architecture and trade-offs | Planned |
+
+> **Note on the M0 exit criteria.** The primary development environment for
+> this project is Google Colab, which has no Docker daemon. "Serves `/healthz`
+> in a container" is therefore proven in the CI `docker-build` job's smoke test
+> (which starts the freshly built image and curls `/healthz`, `/readyz`, and
+> `/metrics`), not by a local `make up`.
 
 ## License
 
