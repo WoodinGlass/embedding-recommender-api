@@ -1,0 +1,50 @@
+# =============================================================================
+# pre-commit — fast checks before every commit.
+#
+# Slow checks (full test suite, Docker build, security scans) run in CI.
+#
+# Install:      make install-hooks
+# Run manually: pre-commit run --all-files
+# =============================================================================
+default_language_version:
+  python: python3
+
+repos:
+  # ---------- generic housekeeping -----------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Preserve Markdown's two-space line-break semantics.
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: detect-private-key
+
+  # ---------- Python lint & format -----------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  # ---------- static types --------------------------------------------------
+  # Runs through the project environment (not an isolated pre-commit env)
+  # because mypy must see installed dependencies to resolve imports.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (strict)
+        entry: mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+        args: [src, tests, scripts]

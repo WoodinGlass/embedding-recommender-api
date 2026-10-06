@@ -174,7 +174,7 @@ warn_redundant_casts = true
 warn_unreachable = true
 no_implicit_optional = true
 show_error_codes = true
-files = ["src", "tests", "evaluation", "pipelines"]
+files = ["src", "tests", "scripts"]
 exclude = ["^migrations/versions/"]
 
 [[tool.mypy.overrides]]
@@ -186,6 +186,8 @@ module = [
   "prefect.*",
   "locust.*",
   "passlib.*",
+  "psycopg.*",
+  "redis.*",
 ]
 ignore_missing_imports = true
 
