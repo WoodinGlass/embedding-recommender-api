@@ -7,7 +7,7 @@ name = "embedding-recommender-api"
 version = "0.1.0"
 description = "Embedding-based recommendation service with low-latency ANN retrieval, re-ranking, and statistically valid A/B testing."
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "WoodinGlass" }]
 keywords = [
@@ -19,6 +19,8 @@ classifiers = [
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
   "Typing :: Typed",
 ]

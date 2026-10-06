@@ -4,7 +4,7 @@
 ](https://github.com/WoodinGlass/embedding-recommender-api/actions/workflows/ci.yml)
 
 
-![Python 3.11](https://img.shields.io/badge/python-3.11-blue)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 
 
 
@@ -87,7 +87,7 @@ flowchart TB
 
 | Layer | Choice |
 |---|---|
-| API | Python 3.11, FastAPI, Pydantic v2 |
+| API | Python 3.11+ (CI tests 3.11 and 3.12), FastAPI, Pydantic v2 |
 | Embeddings | sentence-transformers, exported to ONNX Runtime for fast CPU inference |
 | Vector search | pgvector (HNSW) by default; FAISS as a benchmark option |
 | Data and cache | PostgreSQL; Redis (cache and lightweight feature store) |
