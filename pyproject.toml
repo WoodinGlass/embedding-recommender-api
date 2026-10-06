@@ -1,0 +1,219 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "embedding-recommender-api"
+version = "0.1.0"
+description = "Embedding-based recommendation service with low-latency ANN retrieval, re-ranking, and statistically valid A/B testing."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "WoodinGlass" }]
+keywords = [
+  "recommender-systems", "embeddings", "ann", "pgvector", "hnsw", "faiss",
+  "fastapi", "ab-testing", "mlops", "observability",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Typing :: Typed",
+]
+
+# All runtime dependencies live in optional-dependency groups so that each
+# capability can be installed and reasoned about on its own.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/WoodinGlass/embedding-recommender-api"
+Repository = "https://github.com/WoodinGlass/embedding-recommender-api"
+Issues = "https://github.com/WoodinGlass/embedding-recommender-api/issues"
+
+# =============================================================================
+# Optional dependencies — capability groups (each self-contained)
+# =============================================================================
+[project.optional-dependencies]
+api = [
+  "fastapi>=0.115,<1.0",
+  "uvicorn[standard]>=0.30,<1.0",
+  "pydantic>=2.8,<3.0",
+  "pydantic-settings>=2.4,<3.0",
+  "python-multipart>=0.0.9",
+]
+db = [
+  "sqlalchemy>=2.0,<3.0",
+  "psycopg[binary]>=3.2,<4.0",
+  "alembic>=1.13,<2.0",
+  "pgvector>=0.3,<1.0",
+]
+cache = [
+  "redis>=5.0,<6.0",
+]
+auth = [
+  "pyjwt>=2.9,<3.0",
+  "passlib[bcrypt]>=1.7,<2.0",
+]
+embeddings = [
+  "numpy>=1.26,<3.0",
+  "sentence-transformers>=3.0,<4.0",
+  "onnxruntime>=1.19,<2.0",
+]
+observability = [
+  "structlog>=24.4,<26.0",
+  "prometheus-client>=0.20,<1.0",
+  "opentelemetry-api>=1.27,<2.0",
+  "opentelemetry-sdk>=1.27,<2.0",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.27,<2.0",
+  "opentelemetry-instrumentation-fastapi>=0.48b0",
+]
+experiments = [
+  "numpy>=1.26,<3.0",
+  "scipy>=1.14,<2.0",
+  "statsmodels>=0.14,<1.0",
+]
+churn = [
+  "scikit-learn>=1.5,<2.0",
+  "pandas>=2.2,<3.0",
+]
+pipeline = [
+  "prefect>=3.0,<4.0",
+]
+bench = [
+  "faiss-cpu>=1.8,<2.0",
+]
+load = [
+  "locust>=2.31,<3.0",
+]
+
+# --- meta groups ---
+service = [
+  "embedding-recommender-api[api,db,cache,auth,observability]",
+]
+dev = [
+  "embedding-recommender-api[service,embeddings,experiments,churn,bench,load]",
+  # tests
+  "pytest>=8.3,<9.0",
+  "pytest-asyncio>=0.24,<1.0",
+  "pytest-cov>=6.0,<7.0",
+  "httpx>=0.27,<1.0",
+  "anyio>=4.4,<5.0",
+  # quality
+  "ruff>=0.6,<1.0",
+  "mypy>=1.11,<2.0",
+  "pre-commit>=3.8,<5.0",
+]
+
+# =============================================================================
+# Build targets
+# =============================================================================
+[tool.hatch.build.targets.wheel]
+packages = ["src/recsys"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/",
+  "tests/",
+  "README.md",
+  "LICENSE",
+  "CHANGELOG.md",
+  "pyproject.toml",
+]
+
+# =============================================================================
+# Ruff
+# =============================================================================
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = ["migrations/versions", "notebooks"]
+
+[tool.ruff.lint]
+select = [
+  "E", "W", "F",     # pycodestyle / pyflakes
+  "I",               # isort
+  "N",               # pep8-naming
+  "UP",              # pyupgrade
+  "B",               # bugbear
+  "C4",              # comprehensions
+  "SIM",             # simplify
+  "RUF",             # ruff-specific
+  "S",               # bandit
+  "PT",              # pytest-style
+  "T20",             # no print
+  "ARG",             # unused args
+]
+ignore = [
+  "S101",   # assert (allowed in tests, guarded elsewhere)
+  "B008",   # function call in default arg (FastAPI Depends)
+  "RUF001", "RUF002", "RUF003",  # ambiguous unicode in strings/comments
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**"     = ["S101", "ARG001", "ARG002", "T20"]
+"pipelines/**" = ["T20"]
+"scripts/**"   = ["T20"]
+"evaluation/**"= ["T20"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["recsys"]
+
+# =============================================================================
+# mypy
+# =============================================================================
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+no_implicit_optional = true
+show_error_codes = true
+files = ["src", "tests", "evaluation", "pipelines"]
+exclude = ["^migrations/versions/"]
+
+[[tool.mypy.overrides]]
+module = [
+  "faiss.*",
+  "onnxruntime.*",
+  "sentence_transformers.*",
+  "pgvector.*",
+  "prefect.*",
+  "locust.*",
+  "passlib.*",
+]
+ignore_missing_imports = true
+
+# =============================================================================
+# pytest
+# =============================================================================
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+  "unit: fast, no external services (default)",
+  "integration: requires PostgreSQL (pgvector) and/or Redis",
+  "slow: takes more than a few seconds",
+  "load: Locust/k6 load test scenarios",
+]
+
+# =============================================================================
+# coverage
+# =============================================================================
+[tool.coverage.run]
+source = ["src/recsys"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+]
