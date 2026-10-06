@@ -154,7 +154,11 @@ jobs:
           tags: recsys:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Smoke test /healthz
+      # All smoke checks run in a single step: GitHub Actions executes each
+      # `run:` in a fresh shell, and the EXIT trap cleans up the container at
+      # the end of the step. Splitting would make the container disappear
+      # before the next step could reach it.
+      - name: Smoke test /healthz, /readyz, /metrics
         run: |
           set -euo pipefail
           docker run --rm -d --name recsys-ci \
@@ -163,20 +167,26 @@ jobs:
             -e JWT_SECRET=ci-smoke-secret-not-the-default \
             -p 8000:8000 recsys:ci
           trap 'docker logs recsys-ci || true; docker rm -f recsys-ci || true' EXIT
+
+          echo "--- waiting for /healthz ---"
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8000/healthz; then
               echo
               echo "healthz responded after ${i}s"
-              exit 0
+              break
+            fi
+            if [ "$i" = "30" ]; then
+              echo "healthz did not respond within 30s" >&2
+              exit 1
             fi
             sleep 1
           done
-          echo "healthz did not respond within 30s" >&2
-          docker logs recsys-ci
-          exit 1
-      - name: Smoke test /readyz and /metrics
-        run: |
-          set -euo pipefail
+
+          echo "--- /readyz ---"
           curl -fsS http://127.0.0.1:8000/readyz
+          echo
+
+          echo "--- /metrics ---"
           curl -fsS http://127.0.0.1:8000/metrics | grep -q "recsys_active_index_info"
-          echo "readyz and metrics OK"
+          echo "metrics contains recsys_active_index_info"
+          echo "all smoke checks passed"
