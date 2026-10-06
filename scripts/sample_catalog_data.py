@@ -1,0 +1,373 @@
+"""Seed data for the sample catalog.
+
+Each topic defines a slug, a category, five brands, and ten items. The
+generator (``generate_sample_catalog.py``) turns this into
+``data/sample/catalog.jsonl`` and ``evaluation/golden_set/queries.yaml``.
+
+This file is data, not logic. Every entry is intentionally short so a
+reviewer can read the whole catalog in a browser. Re-running the generator
+after editing this file is deterministic: the output is a pure function of
+this input.
+"""
+
+from __future__ import annotations
+
+from typing import TypedDict
+
+
+class TopicSpec(TypedDict):
+    """One topic in the sample catalog.
+
+    Declaring the shape here (instead of ``dict[str, object]``) lets mypy
+    check every field access in the generator. A missing or mistyped field
+    is caught at type-check time rather than at runtime.
+    """
+
+    slug: str
+    category: str
+    brands: list[str]
+    items: list[tuple[str, str]]
+
+
+TOPICS: list[TopicSpec] = [
+    {
+        "slug": "science_fiction",
+        "category": "books",
+        "brands": ["ace_books", "tor_books", "orbit_books", "del_rey", "gollancz"],
+        "items": [
+            ("Dune", "A desert planet epic about spice, prophecy, and empire."),
+            ("Hyperion", "Seven pilgrims confront the Time Tombs and the Hegemony's fate."),
+            ("Foundation", "A mathematician builds a statistical science to shorten a dark age."),
+            ("Neuromancer", "A burned-out hacker takes one last job to crack a sentient AI."),
+            ("The Left Hand of Darkness", "An envoy visits a world where gender is fluid."),
+            ("A Fire Upon the Deep", "Two civilizations coexist only in flight across the galaxy."),
+            ("Consider Phlebas", "A Culture agent shields a primitive world from a holy war."),
+            ("The Three-Body Problem", "An astrophysicist makes first contact with a dying civilization."),
+            ("Children of Time", "Spiders evolve intelligence faster than humanity expected."),
+            ("Project Hail Mary", "An astronaut wakes light-years from Earth with no memory."),
+        ],
+    },
+    {
+        "slug": "jazz_vinyl",
+        "category": "music",
+        "brands": ["blue_note", "verve", "impulse", "ecm_records", "riverside"],
+        "items": [
+            ("Kind of Blue", "Modal sessions that defined cool, restrained improvisation."),
+            ("A Love Supreme", "A four-part spiritual suite of saxophone devotion."),
+            ("Giant Steps", "Rapid chord changes that became a rite of passage for soloists."),
+            ("Mingus Ah Um", "Post-bop big-band writing that swings hard and argues with itself."),
+            ("Time Out", "A piano trio experiments with odd meters and becomes a hit."),
+            ("Bitches Brew", "Electric fusion sessions that split the jazz world."),
+            ("The Köln Concert", "A solo piano improvisation recorded at midnight in an opera house."),
+            ("Blue Train", "Hard bop quintet sessions from a saxophonist on the edge of fame."),
+            ("Waltz for Debby", "A live trio date where standards and originals breathe together."),
+            ("Saxophone Colossus", "Blues and calypso that became a hard bop cornerstone."),
+        ],
+    },
+    {
+        "slug": "running_shoes",
+        "category": "footwear",
+        "brands": ["brooks", "hoka", "saucony", "altra", "asics"],
+        "items": [
+            ("Ghost 16", "Balanced daily trainer for long easy miles on pavement."),
+            ("Clifton 9", "Lightweight high-stack cushioning that stays comfortable at tempo."),
+            ("Endorphin Speed 4", "Nylon-plated trainer for workouts between easy and race pace."),
+            ("Torin 7", "Zero-drop shoe with a wide toe box for natural stride runners."),
+            ("Gel-Nimbus 26", "Plush long-run shoe with rearfoot gel and a breathable knit."),
+            ("Triumph 22", "Max-cushion neutral trainer for recovery days and long efforts."),
+            ("Speedgoat 6", "Technical trail shoe with aggressive lugs for rocky, wet terrain."),
+            ("Paradigm 7", "Stability trainer with guide rails for overpronation."),
+            ("Rincon 4", "Featherweight daily trainer for runners who want minimal underfoot."),
+            ("Novablast 4", "Bouncy foam midsole for a lively but forgiving daily ride."),
+        ],
+    },
+    {
+        "slug": "mechanical_keyboards",
+        "category": "electronics",
+        "brands": ["keychron", "gmmk", "ducky", "akko", "nuphy"],
+        "items": [
+            ("K8 Pro", "Wireless 75% layout with hot-swap sockets and QMK support."),
+            ("Q1", "Aluminum 75% board with gasket mounting and a rotary knob."),
+            ("One 3 Mini", "65% layout with per-key RGB and a compact, sturdy case."),
+            ("5075B Plus", "75% tri-mode board with south-facing RGB and silent stabilizers."),
+            ("Air75 V2", "Low-profile 75% with a slim aluminum frame for travel."),
+            ("Lucky65 V2", "Budget-friendly 65% with screw-in stabilizers and gasket mount."),
+            ("K12 Pro", "Compact 60% wireless with arrow keys and hot-swap sockets."),
+            ("MOD007", "75% CNC aluminum board with a silicone dampening layer."),
+            ("Halo65", "Low-profile 65% with double-shot PBT keycaps and a knob."),
+            ("Field75 HE", "Hall-effect 75% with adjustable actuation and rapid trigger."),
+        ],
+    },
+    {
+        "slug": "espresso_machines",
+        "category": "kitchen",
+        "brands": ["breville", "gaggia", "rancilio", "lelit", "profitec"],
+        "items": [
+            ("Bambino Plus", "Compact entry-level machine with an automatic steam wand."),
+            ("Classic Pro", "Gaggia Classic with a 9-bar OPV and a commercial steam wand."),
+            ("Silvia Pro X", "Dual-boiler home machine with PID and a 58mm commercial group."),
+            ("MaraX", "Heat-exchanger E61 machine with PID and a quiet rotary pump."),
+            ("Pro 500", "Heat-exchanger with E61 group, PID, and a stainless boiler."),
+            ("Duo Temp Pro", "Single-boiler with PID and a low-pressure pre-infusion."),
+            ("Baby T Plus", "Compact single-boiler for small kitchens and first setups."),
+            ("Bianca", "Dual-boiler E61 machine with flow control and wooden accents."),
+            ("Go", "Portable lever machine for travel with a hand-pumped 9-bar group."),
+            ("Elizabeth", "Dual-boiler PID machine with a small footprint and fast heat-up."),
+        ],
+    },
+    {
+        "slug": "japanese_cooking",
+        "category": "cookbooks",
+        "brands": ["kodansha", "tuttle", "phaidon", "ten_speed", "hardie_grant"],
+        "items": [
+            ("Japanese Cooking: A Simple Art", "A foundational guide to washoku, dashi, and seasonal cooking."),
+            ("Everyday Harumi", "Home-style Japanese comfort food from a London-based teacher."),
+            ("The Japanese Kitchen", "An ingredient-by-ingredient tour with recipes for each."),
+            ("Ivan Ramen", "A chef's obsessive pursuit of a single bowl of Tokyo ramen."),
+            ("Mastering Japanese Home Cooking", "Technique-forward recipes from rice to simmered dishes."),
+            ("Kaiseki", "A photographic study of Japan's seasonal haute cuisine."),
+            ("Washoku", "Traditional Japanese cooking focused on dashi, pickles, and vegetables."),
+            ("The Just Bento Cookbook", "Practical, portable Japanese lunchbox recipes for weekdays."),
+            ("Japanese Farm Food", "Rural home cooking from a farmer's kitchen in western Japan."),
+            ("Kansha", "Vegan Japanese cooking rooted in Buddhist temple traditions."),
+        ],
+    },
+    {
+        "slug": "travel_iceland",
+        "category": "travel",
+        "brands": ["lonely_planet", "rough_guides", "bradt", "dk_eyewitness", "moon"],
+        "items": [
+            ("Iceland: Ring Road", "A driving guide to the full loop with stops and campsites."),
+            ("Reykjavik Pocket Guide", "The capital's food, museums, and geothermal pools in a compact guide."),
+            ("Iceland's Golden Circle", "Detailed guide to Þingvellir, Geysir, and Gullfoss."),
+            ("Iceland Hiking Trails", "Routes for the Laugavegur and other multi-day hikes."),
+            ("Iceland: Highlands", "Guide to the interior F-roads, huts, and 4x4 access rules."),
+            ("Icelandic Photography", "Locations and light for waterfalls, glaciers, and aurora."),
+            ("Iceland with Kids", "Family-friendly itineraries, pools, and short hikes."),
+            ("Westfjords Explorer", "The remote northwest, with ferry logistics and puffin cliffs."),
+            ("Iceland Winter Guide", "Driving, aurora-chasing, and safety for the winter months."),
+            ("Snæfellsnes Peninsula", "Villages, beaches, and glacier views on the western peninsula."),
+        ],
+    },
+    {
+        "slug": "vintage_cameras",
+        "category": "photography",
+        "brands": ["leica", "nikon", "canon", "olympus", "pentax"],
+        "items": [
+            ("Leica M3", "A 1954 rangefinder with one of the clearest viewfinders ever built."),
+            ("Nikon F2", "Professional SLR with modular finders and a legendary shutter."),
+            ("Canon AE-1", "Aperture-priority SLR that brought automation to the masses."),
+            ("Olympus OM-1", "Compact SLR with a large viewfinder and a loyal following."),
+            ("Pentax K1000", "Simple, sturdy student camera with a match-needle meter."),
+            ("Rolleiflex 2.8F", "Twin-lens medium format with a waist-level finder."),
+            ("Hasselblad 500C/M", "Modular medium-format system camera used on the Apollo missions."),
+            ("Contax T2", "Premium titanium point-and-shoot with a sharp Carl Zeiss lens."),
+            ("Yashica Mat-124G", "Affordable twin-lens medium-format with a bright finder."),
+            ("Mamiya RB67", "Studio medium-format SLR with rotating backs and bellows focus."),
+        ],
+    },
+    {
+        "slug": "indoor_plants",
+        "category": "home",
+        "brands": ["the_sill", "leon_george", "greenery_unlimited", "plant_theory", "bloomscape"],
+        "items": [
+            ("Monstera Deliciosa", "A climbing aroid with split leaves, easy in bright indoor light."),
+            ("Snake Plant", "Tolerant succulent with upright leaves that thrives on neglect."),
+            ("ZZ Plant", "Waxy-leaved plant that tolerates drought and low humidity."),
+            ("Pothos", "Trailing vine that roots easily in water and adapts to many lights."),
+            ("Fiddle Leaf Fig", "Large-leaved ficus that rewards bright light and consistency."),
+            ("Peace Lily", "Flowering aroid that signals thirst with drooping leaves."),
+            ("Rubber Plant", "Ficus with dark, glossy leaves that grows into a small tree."),
+            ("Bird of Paradise", "Tropical plant with large paddle leaves and orange flowers."),
+            ("Philodendron Brasil", "Variegated heartleaf philodendron that trails and climbs."),
+            ("Calathea Orbifolia", "Prayer plant with striped leaves that prefers high humidity."),
+        ],
+    },
+    {
+        "slug": "board_games",
+        "category": "games",
+        "brands": ["cge", "stonemaier", "capstone", "dire_wolf", "zmangames"],
+        "items": [
+            ("Brass: Birmingham", "Economic game of the industrial revolution with tight timing."),
+            ("Wingspan", "Engine-building game about birds, habitats, and food chains."),
+            ("Scythe", "Alternate-history 4X game with mechs, farming, and area control."),
+            ("Ark Nova", "Zoo-building game with card-driven actions and a shared map."),
+            ("Terraforming Mars", "Engine game about making the red planet habitable, card by card."),
+            ("Spirit Island", "Cooperative game where players are island spirits driving off invaders."),
+            ("Twilight Struggle", "Two-player Cold War game of influence, coups, and defcon tension."),
+            ("Brass: Lancashire", "Route-building economic game set in 19th-century cotton mills."),
+            ("Viticulture", "Worker-placement game about running a vineyard across seasons."),
+            ("Root", "Asymmetric woodland war game where each faction plays differently."),
+        ],
+    },
+    {
+        "slug": "acoustic_guitars",
+        "category": "instruments",
+        "brands": ["martin", "taylor", "gibson", "yamaha", "guild"],
+        "items": [
+            ("D-28", "Dreadnought with rosewood back and sides and a bluegrass voice."),
+            ("814ce", "Grand auditorium with cutaway, electronics, and a balanced tone."),
+            ("Hummingbird", "Square-shoulder dreadnought with a warm voice and iconic pickguard."),
+            ("FG800", "Affordable solid-top dreadnought that punches above its price."),
+            ("D-55", "Rosewood dreadnought with scalloped bracing and rich overtones."),
+            ("214ce", "Grand auditorium with layered back and sides for the stage."),
+            ("J-45", "Round-shoulder dreadnought with a balanced voice for singer-songwriters."),
+            ("LL16", "Solid-wood dreadnought with a comfortable neck and balanced tone."),
+            ("M-20", "Small-body mahogany guitar with a warm, dry voice."),
+            ("F-130", "Concert-shaped, all-solid guitar with a focused tone."),
+        ],
+    },
+    {
+        "slug": "hiking_backpacks",
+        "category": "outdoor",
+        "brands": ["osprey", "gregory", "deuter", "hyperlite", "granite_gear"],
+        "items": [
+            ("Atmos AG 65", "Anti-gravity suspension with a mesh back panel for ventilation."),
+            ("Baltoro 75", "Heavy-haul pack with a supportive suspension for multi-day trips."),
+            ("Aircontact 65+10", "Durable pack with a close-carrying suspension and adjustable torso."),
+            ("Windrider 55", "Ultralight pack in waterproof fabric for fast-and-light trips."),
+            ("Crown 3 60", "Adjustable ultralight pack with a removable lid and frame."),
+            ("Exos 58", "Lightweight pack with an airy back panel and a stripped-down design."),
+            ("Paragon 58", "Free-float suspension pack with a breathable back panel."),
+            ("Futura Pro 36", "Day-and-a-half pack with a ventilated back and a snug fit."),
+            ("Mariposa 60", "Ultralight pack with a roll-top closure and modular pockets."),
+            ("Blaze 60", "Adjustable pack with a floating lid and a versatile harness."),
+        ],
+    },
+    {
+        "slug": "minimalist_watches",
+        "category": "accessories",
+        "brands": ["daniel_wellington", "nomos", "junghans", "braun", "skagen"],
+        "items": [
+            ("Max Bill Handaufzug", "Bauhaus hand-wound watch with a clean dial and domed crystal."),
+            ("Tangente 38", "Slim hand-wound watch with a minimalist dial and in-house movement."),
+            ("Petite Seconde", "Small-seconds Bauhaus watch with blued hands and a restrained dial."),
+            ("BN0021", "Quartz watch with a stripped-back dial and a functional aesthetic."),
+            ("Classic Petite 36", "Ultra-slim watch with a simple dial and interchangeable straps."),
+            ("Form A", "Quartz watch with a matte dial and a minimalist stainless case."),
+            ("Anita 36", "Slim quartz watch with a mesh band and a clean dial."),
+            ("Max Bill Automatic", "Self-winding Bauhaus watch with a domed crystal and clean layout."),
+            ("Ludwig 38", "Roman-numeral hand-wound watch with a slim case and minimal dial."),
+            ("Signatur", "Quartz watch with a two-hand dial and a brushed-steel case."),
+        ],
+    },
+    {
+        "slug": "whiskey",
+        "category": "spirits",
+        "brands": ["lagavulin", "ardbeg", "glenfiddich", "macallan", "oban"],
+        "items": [
+            ("Lagavulin 16", "Islay single malt with peat smoke, iodine, and a long finish."),
+            ("Ardbeg Uigeadail", "Peated Islay malt matured in sherry casks for a rich dram."),
+            ("Glenfiddich 12", "Speyside single malt with pear, apple, and a light body."),
+            ("Macallan 12 Sherry Oak", "Sherry-matured Highland malt with dried fruit and spice."),
+            ("Oban 14", "Coastal Highland malt balancing smoke, fruit, and sea air."),
+            ("Talisker 10", "Isle of Skye malt with pepper, smoke, and a maritime character."),
+            ("Laphroaig 10", "Heavily peated Islay malt with medicinal smoke and sea salt."),
+            ("Balvenie DoubleWood 12", "Speyside malt finished in sherry casks for honey and spice."),
+            ("Highland Park 12", "Orkney malt with heather honey, smoke, and a balanced body."),
+            ("Bunnahabhain 12", "Unpeated Islay malt with sherry influence and a coastal finish."),
+        ],
+    },
+    {
+        "slug": "sci_fi_films",
+        "category": "film",
+        "brands": ["criterion", "arrow", "shout_factory", "kino_lorber", "vinegar_syndrome"],
+        "items": [
+            ("Blade Runner", "Neo-noir about a replicant hunter questioning what is human."),
+            ("2001: A Space Odyssey", "A cryptic voyage from prehistory to the edge of evolution."),
+            ("Alien", "A crew answers a distress signal and encounters a perfect organism."),
+            ("Arrival", "A linguist races to communicate before geopolitics collapses."),
+            ("Solaris", "A psychologist visits a station where the planet manifests his memories."),
+            ("Stalker", "Three men enter a forbidden zone to reach a room that grants wishes."),
+            ("The Thing", "An Antarctic team confronts a shapeshifting alien among them."),
+            ("Children of Men", "A near-future world where humanity has become infertile."),
+            ("Annihilation", "A biologist enters a zone where biology mutates and identity blurs."),
+            ("Moon", "A lunar worker nears the end of his contract and meets himself."),
+        ],
+    },
+    {
+        "slug": "woodworking",
+        "category": "hobby",
+        "brands": ["lie_nielsen", "veritas", "stanley", "woodriver", "narex"],
+        "items": [
+            ("No. 4 Smoothing Plane", "Bedrock-style smoothing plane for final surface preparation."),
+            ("Low-Angle Jack Plane", "Bevel-up jack plane for end grain, shooting, and general work."),
+            ("DX60 Block Plane", "Ductile-iron block plane with an adjustable mouth for trimming."),
+            ("Marking Gauge", "Wheel-style gauge with a micro-adjust for precise layout work."),
+            ("Dovetail Saw", "Western-style saw with a stiff back for cutting joinery."),
+            ("Chisel Set (4-piece)", "Bevel-edge chisels with ash handles for paring and chopping."),
+            ("Router Plane", "Hand tool for flattening dadoes and cleaning tenon cheeks."),
+            ("Shoulder Plane", "Precision plane for trimming tenon shoulders and rabbets."),
+            ("Card Scraper", "Hardened steel scraper for final smoothing without tear-out."),
+            ("Spokeshave", "Curved-bottom shave for shaping curved and irregular work."),
+        ],
+    },
+    {
+        "slug": "art_theory",
+        "category": "books",
+        "brands": ["phaidon", "mit_press", "thames_hudson", "princeton", "chicago"],
+        "items": [
+            ("Ways of Seeing", "A short book on how reproduction and context change what we see."),
+            ("The Story of Art", "A sweeping survey of Western art from caves to modernism."),
+            ("Art and Visual Perception", "A psychologist's account of how we perceive balance and color."),
+            ("Camera Lucida", "A meditation on photography, loss, and the punctum of an image."),
+            ("The Shape of Time", "A theory of art history as related problem-solutions."),
+            ("Art Since 1900", "A methodological survey of modern and contemporary art."),
+            ("The Originality of the Avant-Garde", "Essays on originality, repetition, and the myth of the new."),
+            ("After the End of Art", "A philosopher argues that art's narrative gave way to pluralism."),
+            ("The Work of Art in the Age of Mechanical Reproduction", "A foundational essay on aura and politics."),
+            ("Painting as an Art", "A philosopher examines what it means to treat painting as an art."),
+        ],
+    },
+    {
+        "slug": "yoga_gear",
+        "category": "fitness",
+        "brands": ["manduka", "lululemon", "jade_yoga", "liforme", "gaiam"],
+        "items": [
+            ("PRO Mat 6mm", "Dense, closed-cell mat with a lifetime warranty and stable grip."),
+            ("The Mat 5mm", "Natural rubber mat with a grippy top layer and a cushioned base."),
+            ("Harmony Mat 5mm", "Rubber mat with a textured surface for sweaty sessions."),
+            ("AlignForMe Mat", "Alignment-marked mat with a rubber base and smooth top."),
+            ("Travel Mat 1.5mm", "Folding travel mat that packs flat for trips."),
+            ("Cork Yoga Block", "Dense cork block for supported poses and balance work."),
+            ("Yoga Strap 8ft", "Cotton strap with a metal buckle for stretching and alignment."),
+            ("Bolster", "Firm cotton bolster for restorative and yin practice."),
+            ("Cotton Yoga Blanket", "Warm, dense blanket for support and warmth in savasana."),
+            ("Yoga Wheel", "Rigid wheel for backbends and chest-opening stretches."),
+        ],
+    },
+    {
+        "slug": "astronomy",
+        "category": "science",
+        "brands": ["celestron", "sky_watcher", "orion", "meade", "explore_scientific"],
+        "items": [
+            ("NexStar 8SE", "8-inch Schmidt-Cassegrain with GoTo mount for deep sky."),
+            ("SkyMax 127", "Maksutov-Cassegrain for high-contrast planetary viewing."),
+            ("Dobsonian 8-inch", "Newtonian on a simple, sturdy altazimuth base."),
+            ("ED80 Refractor", "Apochromatic refractor for wide-field imaging and visual work."),
+            ("StarSense Explorer LT 114", "Smartphone-assisted Dobsonian for beginners."),
+            ("Skyscanner 100", "Tabletop Dobsonian for casual backyard viewing."),
+            ("Heritage 130P", "Compact 130mm Newtonian on a tabletop Dobsonian base."),
+            ("EQ6-R Pro", "Equatorial GoTo mount for astrophotography with heavy payloads."),
+            ("Barlow 2x", "Achromatic Barlow lens that doubles effective focal length."),
+            ("UHC Filter", "Narrowband filter that boosts contrast on nebulae."),
+        ],
+    },
+    {
+        "slug": "synth_analog",
+        "category": "instruments",
+        "brands": ["moog", "korg", "sequential", "arturia", "roland"],
+        "items": [
+            ("Minimoog Model D", "A monophonic legend with three oscillators and a ladder filter."),
+            ("MS-20 Mini", "Semimodular monosynth with patch points and a gritty filter."),
+            ("Prophet-5", "Polyphonic analog with Curtis filters and a lush, evolving character."),
+            ("MicroBrute", "Compact monosynth with a Steiner-Parker filter and a step sequencer."),
+            ("Juno-60", "Six-voice poly with a Roland chorus that defines a decade of pop."),
+            ("Moog Matriarch", "Semimodular paraphonic synth with a ladder filter and stereo delay."),
+            ("Pro-3", "Paraphonic analog synth with three filters and deep modulation."),
+            ("Bass Station II", "Monophonic analog synth designed for bass and lead lines."),
+            ("Jupiter-X", "Hybrid synth with modeled vintage filters and keyboard splits."),
+            ("Korg Monologue", "Monophonic analog synth with a 16-step sequencer and micro-tuning."),
+        ],
+    },
+]

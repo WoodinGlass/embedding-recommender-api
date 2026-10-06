@@ -109,6 +109,8 @@ dev-lite = [
   "ruff>=0.6,<1.0",
   "mypy>=1.11,<2.0",
   "pre-commit>=3.8,<5.0",
+  # scripts/
+  "pyyaml>=6.0,<7.0",
 ]
 # dev: full local environment. Superset of dev-lite.
 dev = [
@@ -167,8 +169,22 @@ ignore = [
 "scripts/**"   = ["T20"]
 "evaluation/**"= ["T20"]
 
+# scripts/sample_catalog_data.py is content, not code: one (title, description)
+# tuple per line. Splitting tuples across lines to satisfy E501 would add ~240
+# lines of noise for zero review benefit — a reviewer reading this file in a
+# browser should see one item per line.
+"scripts/sample_catalog_data.py" = ["E501"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["recsys"]
+
+# The formatter wraps long lines regardless of per-file lint ignores, and it
+# has no per-file line-length override. This file is content: one (title,
+# description) tuple per line is more readable than a wrapped tuple. Excluding
+# it from the formatter is the honest way to keep that layout, while ruff
+# check still inspects it with the E501 ignore declared above.
+[tool.ruff.format]
+exclude = ["scripts/sample_catalog_data.py"]
 
 # =============================================================================
 # mypy
@@ -195,6 +211,7 @@ module = [
   "passlib.*",
   "psycopg.*",
   "redis.*",
+  "yaml.*",
 ]
 ignore_missing_imports = true
 
