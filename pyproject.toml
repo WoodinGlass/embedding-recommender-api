@@ -58,10 +58,22 @@ auth = [
   "pyjwt>=2.9,<3.0",
   "passlib[bcrypt]>=1.7,<2.0",
 ]
-embeddings = [
+# Runtime: online ONNX inference. No torch, no sentence-transformers.
+# The M3 API and the M1.3 batch pipeline install only this.
+inference = [
   "numpy>=1.26,<3.0",
-  "sentence-transformers>=3.0,<4.0",
   "onnxruntime>=1.19,<2.0",
+  "tokenizers>=0.20,<1.0",
+]
+# Offline: export a sentence-transformers model to ONNX. Pulls torch.
+# Used by the export script and the encoder parity test; never at serve time.
+export = [
+  "sentence-transformers>=3.0,<4.0",
+  "onnx>=1.16,<2.0",
+]
+# Meta: everything embedding-related. Convenience for local dev and CI.
+embeddings = [
+  "embedding-recommender-api[inference,export]",
 ]
 observability = [
   "structlog>=24.4,<26.0",
@@ -111,6 +123,8 @@ dev-lite = [
   "pre-commit>=3.8,<5.0",
   # scripts/
   "pyyaml>=6.0,<7.0",
+  # encoder protocol unit tests use numpy without pulling onnxruntime
+  "numpy>=1.26,<3.0",
 ]
 # dev: full local environment. Superset of dev-lite.
 dev = [

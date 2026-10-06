@@ -231,8 +231,10 @@ The JSON line is the integration surface for CI and for M6 orchestration.
 artifacts/
 ├── onnx/
 │   └── <model_slug>/
-│       ├── model.onnx
-│       └── model.onnx.sha256
+│       ├── model.onnx            # the exported graph (mean-pooling + L2-normalize folded in)
+│       ├── model.onnx.sha256     # SHA256 of model.onnx; loaded and re-verified at runtime
+│       ├── tokenizer.json        # fast-tokenizer file; runtime tokenizes without transformers
+│       └── config.json           # {model_name, max_seq_length, embedding_dim}
 └── embeddings/
     └── <model_version>/
         ├── <catalog_snapshot>.parquet
