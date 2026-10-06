@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `docs/adr/0004-versioned-runs-with-current-pointer.md`: embedding artifacts
+  are written into versioned run directories under
+  `artifacts/embeddings/runs/<run_id>/`, and the active run is named by a
+  one-line text file pointer `artifacts/embeddings/current`. The pointer is a
+  file, not a symlink, so the layout is portable across NFS, object storage,
+  and container filesystems. The commit protocol is fixed (Parquet → manifest
+  → state → pointer), each step is an atomic `os.replace`, and only the final
+  step makes a run visible. A `fcntl.flock` on `.lock` serialises runs.
+  (M1.3)
+- `docs/contracts.md` § 1.3: rewritten for the versioned-run layout, the
+  manifest schema, and the `config_hash` definition (parameters that affect
+  embedding content, excluding thread count and batch size). (M1.3)
+- `docs/embedding-pipeline.md` § 6, § 7: rewritten for the run layout,
+  atomic commit protocol, `flock` locking, pre-commit validation, and
+  streaming reuse via `ParquetFile.iter_batches` + `ParquetWriter`. (M1.3)
 - `docs/adr/0003-plain-python-cli-for-embedding-pipeline.md`: the M1
   pipeline ships as a plain Python CLI; orchestration is deferred to M6 and
   will wrap the CLI, not replace it. (M1.0)

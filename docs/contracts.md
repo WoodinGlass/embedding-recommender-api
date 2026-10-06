@@ -110,15 +110,19 @@ class EventEnvelope(BaseModel):
 See § 2.1.
 
 ### 1.3 Embedding artifacts (M1)
+### 1.3 Embedding artifacts (M1)
 
 The embedding pipeline produces versioned artifacts on disk. Their names and
 formats are contracts: anything that reads or writes them must conform. See
 [`docs/embedding-pipeline.md`](embedding-pipeline.md) for the design and
-rationale.
+[`docs/adr/0004-versioned-runs-with-current-pointer.md`](adr/0004-versioned-runs-with-current-pointer.md)
+for why the layout is versioned rather than flat.
 
 **`model_version`** — string, format `<label>+<sha8>`:
-minilm-onnx-v1+a3f9e021
 
+```
+minilm-onnx-v1+a3f9e021
+```
 
 - `<label>` is a human-readable tag chosen by the operator.
 - `<sha8>` is the first 8 hex characters of the SHA256 of the ONNX artifact
@@ -129,8 +133,10 @@ minilm-onnx-v1+a3f9e021
   different `<sha8>` are different models regardless of `<label>`.
 
 **`catalog_snapshot`** — string, format `sha256:<16 hex>`:
-sha256:9f1e2c8a3b5d7e4f
 
+```
+sha256:9f1e2c8a3b5d7e4f
+```
 
 Computed as `sha256("\n".join(f"{item_id}:{content_hash}" for sorted items))`,
 truncated to 16 hex characters. Properties:
@@ -147,18 +153,101 @@ truncated to 16 hex characters. Properties:
 a column in the Parquet so incremental runs can decide "changed / unchanged"
 without re-reading the raw catalog.
 
-**Artifact filenames**:
-artifacts/embeddings/<model_version>/<catalog_snapshot>.parquet
-artifacts/embeddings/<model_version>/<catalog_snapshot>.manifest.json
-artifacts/embeddings/<model_version>/<catalog_snapshot>.checksums.json
-artifacts/onnx/<model_slug>/model.onnx
-artifacts/onnx/<model_slug>/model.onnx.sha256
+**Artifact layout — versioned runs with an atomic `current` pointer**:
 
+```
+artifacts/
+├── onnx/
+│   └── <model_slug>/
+│       ├── model.onnx
+│       ├── model.onnx.sha256
+│       ├── tokenizer.json
+│       └── config.json
+└── embeddings/
+    ├── runs/
+    │   └── <run_id>/
+    │       ├── embeddings.parquet      # the embedding table (the contract)
+    │       ├── manifest.json           # metadata about the run
+    │       └── state.json              # incremental sidecar (not a contract)
+    ├── current                         # one-line text file: the active run_id
+    └── .lock                           # fcntl.flock target
+```
 
 `model_slug` is the model name with `/` replaced by `__` and other
 filesystem-hostile characters removed; e.g.
 `sentence-transformers/all-MiniLM-L6-v2` →
 `sentence-transformers__all-MiniLM-L6-v2`.
+
+`run_id` is `<ISO8601-Z>__<model_version>`, e.g.
+`2026-10-07T11-30-00Z__minilm-onnx-v1+a3f9e021`. Both components are also
+recorded inside `manifest.json`, so parsing the run_id is never required.
+
+**The `current` pointer** is a text file containing one line: the `run_id`
+of the active run, terminated by a single newline. It is written last in
+the commit sequence (see `docs/adr/0004-versioned-runs-with-current-pointer.md`).
+Consumers read `artifacts/embeddings/current` and then
+`runs/<run_id>/manifest.json`; they never reconstruct a run_id or scan the
+`runs/` directory.
+
+**The manifest** is the source of truth for what a run contains:
+
+```json
+{
+  "schema_version": 1,
+  "created_at": "2026-10-07T11:30:00Z",
+  "run_id": "2026-10-07T11-30-00Z__minilm-onnx-v1+a3f9e021",
+  "mode": "incremental",
+  "model_version": "minilm-onnx-v1+a3f9e021",
+  "preprocessing_version": "v1",
+  "config_hash": "sha256:...",
+  "catalog_snapshot": "sha256:...",
+  "onnx_artifact_sha256": "e9c6...",
+  "parquet": {
+    "path": "runs/2026-10-07T11-30-00Z__minilm-onnx-v1+a3f9e021/embeddings.parquet",
+    "sha256": "...",
+    "rows": 200,
+    "encoded_rows": 0,
+    "dim": 384,
+    "dtype": "float32"
+  },
+  "state": {
+    "path": "runs/2026-10-07T11-30-00Z__minilm-onnx-v1+a3f9e021/state.json",
+    "sha256": "..."
+  },
+  "environment": {
+    "python_version": "3.11.16",
+    "onnxruntime_version": "1.19.0",
+    "numpy_version": "2.1.0",
+    "pyarrow_version": "17.0.0"
+  }
+}
+```
+
+Paths inside `manifest.json` are **relative to `artifacts/embeddings/`**, so
+the directory can be relocated without rewriting the manifest.
+
+**`config_hash`** is a SHA256 over a canonical JSON object containing every
+parameter that changes the embedding content:
+
+```
+{
+  "preprocessing_version": "v1",
+  "onnx_artifact_sha256": "e9c6...",
+  "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+  "max_seq_length": 256,
+  "embedding_dim": 384,
+  "pooling": "mean",
+  "normalize": true
+}
+```
+
+Thread count and batch size are **excluded**: they affect bit-level noise
+within the tolerance band defined in § 5 of `docs/embedding-pipeline.md`, but
+not the embedding's meaning. Including them would force a full re-encode on
+every CI run.
+
+`state.json` is not part of the contract — see `docs/embedding-pipeline.md`
+§ 7.1. Deleting it only costs performance.
 
 **Determinism contract** — three tiers. Full rationale in
 `docs/embedding-pipeline.md` § 5.
@@ -168,8 +257,6 @@ filesystem-hostile characters removed; e.g.
 | Strict | SHA256 of `*.parquet` matches between two consecutive runs in the same environment | CI only |
 | Semantic | Top-k (k=10) neighbours for a fixed probe set are identical — same item IDs, same order, ties broken by `item_id` ascending | CI and local |
 | Tolerance | Per-row cosine similarity ≥ 0.9999 between two runs | Local only |
-
----
 
 ## 2. API contracts
 

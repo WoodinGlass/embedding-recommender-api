@@ -32,13 +32,14 @@ framework) is an ADR: [`docs/adr/0003-plain-python-cli-for-embedding-pipeline.md
 ---
 
 ## 2. Inputs and outputs
+## 2. Inputs and outputs
 
 **Input — catalog**
 
 One JSONL file, one item per line. `data/sample/catalog.jsonl` in the repo is
 the canonical sample; larger catalogs are generated or fetched via DVC.
 
-```json
+```
 {"item_id": "i_0001", "title": "Dune", "description": "A desert planet epic about spice, prophecy, and empire.", "category": "science_fiction", "brand": "ace_books"}
 ```
 
@@ -47,27 +48,42 @@ Unknown fields are ignored. Missing required fields are a hard error.
 
 **Output — embedding artifacts**
 
-For each `(model_version, catalog_snapshot)` pair:
+Each pipeline run writes a **versioned run directory** under
+`artifacts/embeddings/runs/`, plus a small file pointer
+`artifacts/embeddings/current` that names the active run. The full layout,
+the manifest schema, and the `config_hash` definition are specified in
+`docs/contracts.md` § 1.3; the atomicity guarantees are the subject of
+[ADR-0004](adr/0004-versioned-runs-with-current-pointer.md).
 
 ```
-artifacts/embeddings/<model_version>/<catalog_snapshot>.parquet
-artifacts/embeddings/<model_version>/<catalog_snapshot>.manifest.json
-artifacts/embeddings/<model_version>/<catalog_snapshot>.checksums.json
+artifacts/embeddings/
+├── runs/
+│   └── <ISO8601-Z>__<model_version>/
+│       ├── embeddings.parquet      # one row per item (the contract)
+│       ├── manifest.json           # metadata about the run
+│       └── state.json              # incremental sidecar (§ 7.1)
+├── current                         # one line: the active run_id
+└── .lock                           # fcntl.flock target
 ```
 
-- `*.parquet` — one row per item: `item_id`, `embedding` (list<float32>,
-  fixed length), `content_hash`, `preprocessing_version`. No other columns.
-- `*.manifest.json` — records `model_version`, `catalog_snapshot`,
-  `row_count`, `embedding_dim`, `preprocessing_version`, `created_at`,
-  `onnx_artifact_sha256`, `python_version`, `onnxruntime_version`,
-  `numpy_version`.
-- `*.checksums.json` — `{"parquet_sha256": "<64 hex>"}`.
+- `embeddings.parquet` — one row per item: `item_id`, `embedding`
+  (list<float32>, fixed length), `content_hash`, `preprocessing_version`.
+  No other columns. Rows are sorted by `item_id`.
+- `manifest.json` — the source of truth for what the run contains:
+  `model_version`, `preprocessing_version`, `config_hash`,
+  `catalog_snapshot`, `onnx_artifact_sha256`, `parquet` (path, sha256,
+  rows, encoded_rows, dim, dtype), `state` (path, sha256), `environment`
+  (python, onnxruntime, numpy, pyarrow versions), and `created_at`.
+  `created_at` makes the manifest *not* byte-stable, by design; the strict
+  determinism tier in § 5.1 applies to the Parquet only.
+- `state.json` — a supporting file for incremental runs (§ 7.1). Not part
+  of the contract.
+- `current` — a one-line text file containing the active `run_id`. Written
+  last in the commit sequence. This is what makes a run visible.
 
-The manifest exists so that a reviewer (or a future run) can reconstruct
-exactly what environment produced this file. Without it, "byte-identical"
-becomes unfalsifiable two months later.
-
----
+The manifest exists so a reviewer (or a future run) can reconstruct exactly
+what environment produced this file. Without it, "byte-identical" becomes
+unfalsifiable two months later.
 
 ## 3. Version strings
 
@@ -183,23 +199,36 @@ test invocation, and is the assertion that gates a merge.
 ---
 
 ## 6. Pipeline modes
+## 6. Pipeline modes
 
 Two modes, one primitive.
 
 **Incremental** — default.
 
 - Trigger: item inserted or updated.
-- Scope: items whose `content_hash` is absent from the current artifact, or
-  differs.
-- Output: a new `<catalog_snapshot>` that reflects the updated catalog; the
-  previous snapshot's files are left in place (they are the artifact history).
+- Scope: items whose `content_hash` differs from the value recorded in the
+  current `state.json` (§ 7.1), plus any item not present in that state.
+- Output: a new run directory whose Parquet contains every item in the
+  catalog — reusing embeddings from the previous Parquet for unchanged items,
+  encoding only the changed ones. Previous run directories are left in place
+  (they are the artifact history, and they are the rollback target).
+- Fallback: if `state.json` is missing, malformed, or its `config_hash`,
+  `model_version`, or `preprocessing_version` do not match the current
+  invocation, every item is treated as changed. The run is still correct,
+  just slower.
+- Idempotency: if the catalog snapshot, config hash, and per-item content
+  hashes all match the currently active run, the pipeline writes nothing,
+  leaves `current` untouched, exits 0, and reports `"status": "no_changes"`.
 
 **Batch** — invoked explicitly.
 
 - Trigger: model upgrade, catalog re-import, or a scheduled rebuild.
 - Scope: every item in the input catalog.
-- Output: a new `<model_version>/<catalog_snapshot>` pair; nothing is
-  overwritten.
+- Output: a new run directory. Previous runs are not modified.
+- Idempotency: batch always writes a new run, even if nothing changed. This
+  preserves the strict determinism contract: two batch runs of the same
+  catalog under the same pinned environment must produce byte-identical
+  Parquet, which requires a fresh write each time.
 
 Both modes call the same `embed_batch(items, encoder) -> np.ndarray`
 primitive. Mode decides *which items go in*, not *how they are embedded*. That
@@ -213,18 +242,22 @@ python -m recsys.embeddings.pipeline --mode=incremental \
   --out artifacts/embeddings
 ```
 
-Exit codes: `0` success, `2` input error (missing/invalid catalog), `3`
-encoder error (ONNX load failure), `4` output error (disk full, permission).
+Exit codes: `0` success (including `no_changes`), `2` input error
+(missing/invalid catalog), `3` encoder error (ONNX load failure), `4` output
+error (disk full, permission, validation failure), `5` lock timeout
+(another pipeline run holds `.lock`).
+
 The stdout summary is a single JSON line:
 
-```json
-{"event": "pipeline.done", "mode": "incremental", "model_version": "minilm-onnx-v1+a3f9e021", "catalog_snapshot": "sha256:9f1e2c8a3b5d7e4f", "row_count": 200, "embedding_dim": 384, "duration_ms": 4123, "parquet_sha256": "..."}
+```
+{"event":"pipeline.done","status":"ok","mode":"incremental","run_id":"2026-10-07T11-30-00Z__minilm-onnx-v1+a3f9e021","model_version":"minilm-onnx-v1+a3f9e021","config_hash":"sha256:...","catalog_snapshot":"sha256:9f1e2c8a3b5d7e4f","total":200,"unchanged":200,"changed":0,"new":0,"deleted":0,"encoded":0,"duration_ms":89,"output_path":"artifacts/embeddings/runs/2026-10-07T11-30-00Z__minilm-onnx-v1+a3f9e021/embeddings.parquet","checksum":"..."}
 ```
 
 The JSON line is the integration surface for CI and for M6 orchestration.
+Per-batch progress lines go to **stderr** (also JSON), so stdout stays a
+single line and can be piped into `jq` without filtering.
 
----
-
+## 7. Storage layout
 ## 7. Storage layout
 
 ```
@@ -236,21 +269,145 @@ artifacts/
 │       ├── tokenizer.json        # fast-tokenizer file; runtime tokenizes without transformers
 │       └── config.json           # {model_name, max_seq_length, embedding_dim}
 └── embeddings/
-    └── <model_version>/
-        ├── <catalog_snapshot>.parquet
-        ├── <catalog_snapshot>.manifest.json
-        └── <catalog_snapshot>.checksums.json
+    ├── runs/
+    │   └── <run_id>/
+    │       ├── embeddings.parquet
+    │       ├── manifest.json
+    │       └── state.json
+    ├── current                   # one-line text file: the active run_id
+    └── .lock                     # fcntl.flock target
 ```
 
 `model_slug` is the model name with `/` replaced by `__` and any other
 filesystem-hostile character removed. Example:
 `sentence-transformers/all-MiniLM-L6-v2` → `sentence-transformers__all-MiniLM-L6-v2`.
 
+`run_id` is `<ISO8601-Z>__<model_version>`. Both components are also stored
+inside `manifest.json`, so parsing the run_id is never required.
+
 `artifacts/` is git-ignored. Sample artifacts (small, deterministic) can be
 committed under `data/sample/artifacts/` for tests; the real catalog's
 artifacts live in DVC or an object store (see `docs/decisions.md` § 4).
 
----
+### 7.1 Incremental state file
+
+Incremental runs need to decide, per item, whether its content has changed
+since the last run. Reading the last Parquet in full and re-hashing every row
+is the wrong trade: for a 1M-item catalog, that reads ~1.5 GB just to answer
+"which 100 items changed?". Full memory loading is worse still: a 1M x 384
+float32 table is 1.5 GB in the best case and 3–4 GB during conversion.
+
+Instead, each successful run writes a small sidecar inside its run directory:
+
+```
+artifacts/embeddings/runs/<run_id>/state.json
+```
+
+Shape:
+
+```
+{
+  "schema_version": 1,
+  "model_version": "minilm-onnx-v1+a3f9e021",
+  "preprocessing_version": "v1",
+  "config_hash": "sha256:...",
+  "hash_algorithm": "sha256",
+  "catalog_snapshot": "sha256:9f1e2c8a3b5d7e4f",
+  "items": {
+    "i_0001": "abcdef0123456789",
+    "i_0002": "0123456789abcdef"
+  }
+}
+```
+
+The state is considered **valid for reuse** only if all of the following
+match the current invocation:
+
+1. `schema_version == 1`
+2. `model_version` equals the encoder's `model_version`
+3. `preprocessing_version` equals `PREPROCESSING_VERSION`
+4. `config_hash` equals the current config hash (§ 1.3 of `docs/contracts.md`)
+
+If any do not match, every item is treated as changed (an "invalidated"
+state). This is what makes a model upgrade or a preprocessing change
+correctly trigger a full re-encode even when the catalog text is unchanged.
+
+`state.json` is *not* part of the artifact contract — it is a cache that can
+be deleted and rebuilt by running `--mode=batch`. The contract for downstream
+consumers is `embeddings.parquet` and `manifest.json`. If `state.json` is
+missing, malformed, or invalidated, incremental mode falls back to treating
+every item as changed (logging a `pipeline.state.invalidated` warning with
+the specific mismatch), which is correct but slower.
+
+State is written **atomically**: the pipeline writes to a temp file in the
+same directory, `fsync`, then `os.replace`. It is also written **after** the
+Parquet and manifest, never before, so a crash cannot leave the state
+pointing at an artifact that does not exist (see § 7.2).
+
+### 7.2 Commit protocol (atomicity)
+
+The pipeline commits a run in four ordered steps, each of which is an
+atomic write (`tempfile` in the target directory → `fsync` → `os.replace`):
+
+1. `runs/<run_id>/embeddings.parquet`
+2. `runs/<run_id>/manifest.json`
+3. `runs/<run_id>/state.json`
+4. `current` (the file pointer)
+
+Only step 4 makes the run visible. A crash before step 4 leaves the previous
+`current` in place; the new run directory is orphaned and will be ignored by
+consumers. A crash between steps 2 and 3 leaves the Parquet and manifest in
+place but no state; the next incremental run sees the previous state (or
+none) and re-encodes whatever it cannot prove is unchanged. This is safe by
+construction.
+
+The inverse ordering (write `current` first, or write state before Parquet)
+would allow a consumer to read a manifest whose Parquet is missing, or an
+incremental run to skip items whose new embeddings were never written. Both
+are prevented by the fixed order above.
+
+### 7.3 Locking
+
+Every pipeline invocation takes an exclusive `fcntl.flock` on
+`artifacts/embeddings/.lock` before reading state or writing anything. If the
+lock is held, the CLI retries briefly (default 30 s, configurable with
+`--lock-timeout`) and then exits with code `5` and a
+`{"event":"pipeline.locked"}` line on stderr.
+
+`flock` is auto-released by the kernel when the process dies, so there is no
+stale-lock problem. **NFS is not supported**: `flock` semantics are not
+reliable on NFS and many network filesystems. Moving artifacts to NFS, EFS,
+or an object store will require a different locking strategy — a separate
+ADR.
+
+### 7.4 Validation before commit
+
+Before writing anything, the pipeline validates the assembled table:
+
+- `embeddings.dtype == np.float32`
+- `embeddings.shape == (n_items, encoder.embedding_dim)`
+- `np.isfinite(embeddings).all()` (no NaN, no Inf)
+- `len(set(item_ids)) == len(item_ids)` (unique IDs)
+- `np.allclose(np.linalg.norm(embeddings, axis=1), 1.0, atol=1e-4)`
+- `len(item_ids) == len(content_hashes) == manifest.rows`
+
+A failure raises `OutputError` and no files are written. This catches the
+class of bugs — off-by-one in the merge, wrong pooling, model loaded with the
+wrong dimension — that would otherwise reach M2 retrieval and produce
+plausible-looking but wrong results.
+
+### 7.5 Streaming
+
+Reuse does not load the previous Parquet into memory. The pipeline opens the
+previous Parquet with `pyarrow.parquet.ParquetFile.iter_batches`, walks it
+batch by batch, and for each batch either forwards the rows (unchanged
+items) or drops them (changed or deleted items). New embeddings are produced
+in the same batch size and interleaved before writing. Peak memory is
+`batch_size * dim * 4 bytes`, i.e. ~77 MB at batch size 50k and dim 384.
+
+Writing uses `pyarrow.parquet.ParquetWriter`, one row group per output
+batch, with `zstd` compression. No intermediate fully-materialised array is
+created.
 
 ## 8. Sample catalog and golden set
 

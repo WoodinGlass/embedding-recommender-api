@@ -73,7 +73,7 @@ export = [
 ]
 # Meta: everything embedding-related. Convenience for local dev and CI.
 embeddings = [
-  "embedding-recommender-api[inference,export]",
+  "embedding-recommender-api[inference,export,pipeline]",
 ]
 observability = [
   "structlog>=24.4,<26.0",
@@ -92,8 +92,16 @@ churn = [
   "scikit-learn>=1.5,<2.0",
   "pandas>=2.2,<3.0",
 ]
+# Batch pipeline: [inference] plus Parquet I/O. The API image (M3) installs
+# [inference] only, so pyarrow never reaches production serving. Orchestration
+# (Prefect, Airflow) is deferred to M6 and will add its own group then; see
+# docs/adr/0003-plain-python-cli-for-embedding-pipeline.md.
 pipeline = [
-  "prefect>=3.0,<4.0",
+  "embedding-recommender-api[inference]",
+  # pyarrow is pinned tightly: the Parquet API and the list<float32>
+  # representation used by the writer have both changed across minor
+  # releases. Bump deliberately and re-run the determinism suite.
+  "pyarrow>=17.0,<18.0",
 ]
 bench = [
   "faiss-cpu>=1.8,<2.0",
@@ -125,6 +133,8 @@ dev-lite = [
   "pyyaml>=6.0,<7.0",
   # encoder protocol unit tests use numpy without pulling onnxruntime
   "numpy>=1.26,<3.0",
+  # artifact writer unit tests use pyarrow without pulling the encoder
+  "pyarrow>=17.0,<18.0",
 ]
 # dev: full local environment. Superset of dev-lite.
 dev = [
@@ -220,7 +230,6 @@ module = [
   "onnxruntime.*",
   "sentence_transformers.*",
   "pgvector.*",
-  "prefect.*",
   "locust.*",
   "passlib.*",
   "psycopg.*",
