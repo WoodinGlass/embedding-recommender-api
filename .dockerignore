@@ -1,0 +1,64 @@
+# =============================================================================
+# Keep the build context small and free of secrets.
+# =============================================================================
+
+# --- VCS ------------------------------------------------------------------
+.git
+.gitignore
+.gitattributes
+
+# --- CI & dev tooling -----------------------------------------------------
+.github
+.pre-commit-config.yaml
+Makefile
+docker-compose.yml
+docker-compose.*.yml
+
+# --- Python caches & build artifacts --------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+
+# --- Test & quality caches ------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# --- Repo content not needed at runtime -----------------------------------
+tests/
+scripts/
+pipelines/
+evaluation/
+docs/
+dashboards/
+migrations/
+data/
+notebooks/
+deploy/
+
+# --- Docs: allow only README.md (referenced by pyproject.toml) ------------
+*.md
+!README.md
+
+# --- Secrets / env --------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# --- Editor / OS ----------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

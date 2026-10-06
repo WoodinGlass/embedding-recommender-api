@@ -1,15 +1,18 @@
-"""Run the API with uvicorn: ``python -m recsys``."""
+"""Run the API as a production-style ASGI server: ``python -m recsys``.
+
+Autoreload is deliberately disabled here so the entry point is safe to use as
+a container command. For local development with reload, run uvicorn directly:
+
+    uvicorn recsys.api.app:app --reload
+"""
 
 from __future__ import annotations
 
 import uvicorn
 
-from recsys.config.settings import get_settings
-
 
 def main() -> None:
     """Entry point for ``python -m recsys``."""
-    settings = get_settings()
     uvicorn.run(
         "recsys.api.app:app",
         # Bind all interfaces: required for container ingress. Auth and rate
@@ -18,7 +21,7 @@ def main() -> None:
         port=8000,
         log_config=None,    # structlog handles formatting
         access_log=False,   # AccessLogMiddleware emits our structured line
-        reload=settings.app_env.value == "dev",
+        reload=False,
     )
 
 

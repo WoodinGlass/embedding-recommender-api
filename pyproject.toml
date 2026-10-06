@@ -94,8 +94,11 @@ load = [
 service = [
   "embedding-recommender-api[api,db,cache,auth,observability]",
 ]
-dev = [
-  "embedding-recommender-api[service,embeddings,experiments,churn,bench,load]",
+# dev-lite: everything needed for lint and unit tests, without the heavy
+# ML runtime (torch/sentence-transformers) or the pipelines. CI uses this for
+# the fast gates so a PR does not wait on a ~800 MB download.
+dev-lite = [
+  "embedding-recommender-api[api,observability]",
   # tests
   "pytest>=8.3,<9.0",
   "pytest-asyncio>=0.24,<1.0",
@@ -106,6 +109,10 @@ dev = [
   "ruff>=0.6,<1.0",
   "mypy>=1.11,<2.0",
   "pre-commit>=3.8,<5.0",
+]
+# dev: full local environment. Superset of dev-lite.
+dev = [
+  "embedding-recommender-api[dev-lite,service,embeddings,experiments,churn,bench,load]",
 ]
 
 # =============================================================================
