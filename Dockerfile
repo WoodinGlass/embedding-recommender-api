@@ -24,9 +24,10 @@ WORKDIR /build
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy only what the build needs. Hatchling reads pyproject.toml and packages
-# src/; README.md is referenced by the project metadata.
-COPY pyproject.toml README.md ./
+# Copy only what the build needs. Hatchling validates `readme` and
+# `license = { file = ... }` from pyproject.toml, so both README.md and
+# LICENSE must be present at build time. src/ holds the package itself.
+COPY pyproject.toml README.md LICENSE ./
 COPY src/ ./src/
 
 RUN python -m pip install --upgrade pip && \
@@ -37,10 +38,12 @@ RUN python -m pip install --upgrade pip && \
 # -----------------------------------------------------------------------------
 FROM python:3.11-slim-bookworm AS runtime
 
-# Non-root user with a stable UID so bind mounts behave predictably.
-RUN groupadd --system --gid 1000 recsys && \
-    useradd  --system --uid 1000 --gid recsys \
-             --create-home --shell /usr/sbin/nologin recsys
+# Non-root user with a stable UID so bind mounts behave predictably. uid 1000
+# is the conventional first non-system user; the --system flag is omitted
+# because it warns when the uid is above SYS_UID_MAX.
+RUN groupadd --gid 1000 recsys && \
+    useradd --uid 1000 --gid recsys \
+            --create-home --shell /usr/sbin/nologin recsys
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
