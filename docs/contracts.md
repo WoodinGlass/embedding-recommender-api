@@ -258,6 +258,86 @@ every CI run.
 | Semantic | Top-k (k=10) neighbours for a fixed probe set are identical — same item IDs, same order, ties broken by `item_id` ascending | CI and local |
 | Tolerance | Per-row cosine similarity ≥ 0.9999 between two runs | Local only |
 
+### 1.4 Index registry and index identity (M2)
+
+M2 introduces a persistent index registry and an `index_version` identifier.
+Both are contracts: anything that reads or writes the `index_registry` table,
+or that puts an `index_version` in a response, must conform. Full rationale
+in `docs/adr/0006-pgvector-schema.md` and
+`docs/adr/0007-index-version-identity.md`; the shape below is the contract.
+
+**`index_version` format** — string, `idx-<8 hex>` (extended to 12 hex on
+collision):
+
+```
+idx-a3f9e021
+```
+
+Computed as the first 8 hex characters of the SHA256 over a canonical JSON
+object containing exactly these fields:
+
+```
+{
+  "model_version":         "minilm-onnx-v1+a3f9e021",
+  "catalog_snapshot":      "sha256:9f1e2c8a3b5d7e4f",
+  "preprocessing_version": "v1",
+  "metric":                "cosine",
+  "hnsw_m":                16,
+  "hnsw_ef_construction":  64,
+  "pgvector_version":      "0.8.0"
+}
+```
+
+- Canonicalization: `sort_keys=True`, `separators=(",", ":")`, UTF-8, no
+  trailing newline.
+- **Excluded by design:** `hnsw_ef_search` (a query-time knob; changing it
+  does not require a rebuild) and `golden_set_version` (evaluation
+  metadata; changing the golden set does not require a rebuild).
+- **Collision handling:** on a collision where the existing row's hash
+  inputs differ, extend to 12 hex. On a collision where they match, treat
+  the build as a duplicate and do not create a row.
+- **Capture time:** `pgvector_version` is captured at build time from
+  `SELECT extversion FROM pg_extension WHERE extname = 'vector'` and stored
+  in `index_registry`. It is not re-queried at runtime.
+
+**`index_registry` schema** — the source of truth for what an index
+contains and how it behaves:
+
+| Column | Type | Notes |
+|---|---|---|
+| `index_version` | `TEXT` (PK) | Format above |
+| `model_version` | `TEXT` | Matches M1 `model_version` |
+| `catalog_snapshot` | `TEXT` | Matches M1 `catalog_snapshot` |
+| `preprocessing_version` | `TEXT` | Matches M1 `preprocessing_version` |
+| `metric` | `TEXT` | `cosine` \| `l2` \| `ip` |
+| `hnsw_m` | `INTEGER` | Build parameter |
+| `hnsw_ef_construction` | `INTEGER` | Build parameter |
+| `hnsw_ef_search` | `INTEGER` | Default query-time knob |
+| `pgvector_version` | `TEXT` | Captured at build time |
+| `golden_set_version` | `TEXT` | Golden set the thresholds apply to |
+| `row_count` | `INTEGER` | Number of embeddings in this index |
+| `status` | `TEXT` | `building` \| `active` \| `retired` |
+| `created_at` | `TIMESTAMPTZ` | |
+| `activated_at` | `TIMESTAMPTZ` (nullable) | Set when status becomes `active` |
+| `retired_at` | `TIMESTAMPTZ` (nullable) | Set when status becomes `retired` |
+
+**State transitions** are constrained: `building` → `active` → `retired`.
+An index in `active` is unique, enforced by a partial unique index on
+`status = 'active'`. Nothing else is a valid transition; a caller that
+attempts one receives an error from the database, not from application
+code.
+
+**Where `index_version` appears**:
+
+- `embedding.index_version` — foreign key; every embedding row belongs to
+  exactly one index.
+- `RecommendResponse.meta.index_version` — § 2.1.
+- `recsys_active_index_info{index_version=...}` — § 4.1 (metric label).
+
+**`catalog_snapshot` and `preprocessing_version` are not recomputed** at
+query time. They describe the artifact an index was built from; the
+registry row is authoritative.
+
 ## 2. API contracts
 
 All request and response bodies are JSON, `Content-Type: application/json`.
@@ -276,6 +356,16 @@ class RecommendFilters(BaseModel):
     brand: str | None = None
     language: str | None = None
     # Allowlist expands via ADR; never accept arbitrary field names.
+
+**Filter allowlist — `FILTER_FIELDS`.** The set of filter fields is
+`{"category", "brand", "language"}`, defined once in
+`src/recsys/retrieval/filters.py` as `FILTER_FIELDS` and referenced by both
+the API schemas and the retrieval layer. It is not duplicated in the
+retrieval code. Adding a field requires a change to this section of
+`contracts.md` and to `FILTER_FIELDS` in the same PR. Filter values are
+always passed to the database as parameters, never interpolated into SQL;
+a value outside the allowlist is rejected by the API at `422` before it
+reaches retrieval.
 
 
 class RecommendRequest(BaseModel):
@@ -489,6 +579,38 @@ Every log line is a JSON object. Field names below are reserved.
 **Sampling:** 100% of errors, 10% of successes in `prod`, 100% in `dev`/`staging`.
 
 ---
+
+### 4.4 Retrieval log events (M2)
+
+The retrieval layer emits structured log lines through
+:mod:`recsys.monitoring.logging` (M0). The `event` names below are stable;
+renaming requires an ADR. All are JSON, all carry the standard reserved
+fields from § 4.2 (`ts`, `level`, `event`), and none contain PII or raw
+query vectors.
+
+| Event | Level | When | Extra fields |
+|---|---|---|---|
+| `retrieval.pgvector.version` | INFO | Once per process, at first use | `detected` (string, e.g. `"0.8.0"`) |
+| `retrieval.pgvector.old_version` | WARNING | Once per process, when detected version < 0.8 | `detected`, `required_for_iterative_scan`, `fallback` |
+| `retrieval.pgvector.fallback` | WARNING | Per filtered query on pgvector < 0.8 | `reason`, `detected`, `requested_k`, `effective_k` |
+| `index.build.done` | INFO | After a build commits | `index_version`, `model_version`, `catalog_snapshot`, `row_count`, `duration_ms` |
+| `index.build.duplicate` | INFO | When a build is a no-op (identical inputs) | `index_version` |
+| `index.build.error` | ERROR | On a build failure | `index_version` (if allocated), `error.type`, `error.message` |
+| `index.promote.done` | INFO | After a promote commits | `index_version`, `previous_index_version`, `duration_ms` |
+| `index.promote.error` | ERROR | On a promote failure | `index_version`, `error.type`, `error.message` |
+| `index.rollback.done` | INFO | After a rollback commits | `index_version`, `previous_index_version` |
+
+**`retrieval.pgvector.fallback` is not silenced in production.** It is
+the signal that an environment is running on an older extension and
+serving filtered queries with a heuristic over-fetch. Suppressing it would
+remove the only per-invocation evidence of the degraded path.
+
+**Log volume.** `retrieval.pgvector.version` and
+`retrieval.pgvector.old_version` fire exactly once per process. The other
+retrieval events fire on user-driven actions (a fallback query, a build, a
+promote). No per-request log line is emitted from the retrieval layer
+itself; the access log (§ 4.2, `http.request`) covers request-level
+tracing, and it carries the `source` label from § 4.1.
 
 ## 5. Idempotency matrix
 
