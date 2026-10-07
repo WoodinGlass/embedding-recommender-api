@@ -18,6 +18,7 @@ import pathlib
 import subprocess
 import sys
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 
@@ -25,7 +26,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture(scope="session")
-def pg_connection() -> Iterator[object]:
+def pg_connection() -> Iterator[Any]:
     """A live psycopg connection with migrations applied.
 
     Skips unless ``RECSYS_TEST_DATABASE_URL`` is set. Runs
@@ -60,7 +61,7 @@ def pg_connection() -> Iterator[object]:
 
 
 @pytest.fixture
-def clean_db(pg_connection: object) -> Iterator[None]:
+def clean_db(pg_connection: Any) -> Iterator[None]:
     """Truncate M2 tables before and after each test.
 
     Order matters only in principle: ``TRUNCATE ... CASCADE`` handles the

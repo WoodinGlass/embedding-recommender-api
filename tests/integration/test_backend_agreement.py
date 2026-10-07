@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import json
 import pathlib
+from typing import Any, cast
 
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 from recsys.retrieval.build import (
     build_index,
@@ -42,7 +44,7 @@ def _write_run(
     run_id: str,
     item_ids: list[str],
     seed: int,
-) -> np.ndarray:
+) -> NDArray[np.float32]:
     """Write a run directory and return its embeddings for cross-check."""
     from recsys.embeddings.artifacts import ParquetBatchWriter
 
@@ -50,9 +52,9 @@ def _write_run(
     run_dir.mkdir(parents=True, exist_ok=True)
     dim = 8
     rng = np.random.default_rng(seed)
-    raw = rng.standard_normal((len(item_ids), dim)).astype(np.float32)
+    raw: NDArray[np.float32] = rng.standard_normal((len(item_ids), dim)).astype(np.float32)
     norms = np.linalg.norm(raw, axis=1, keepdims=True)
-    vecs = (raw / norms).astype(np.float32)
+    vecs = cast(NDArray[np.float32], (raw / norms).astype(np.float32))
 
     with ParquetBatchWriter(run_dir / "embeddings.parquet", embedding_dim=dim) as w:
         w.write_batch(
@@ -114,7 +116,9 @@ def _write_catalog(path: pathlib.Path, item_ids: list[str]) -> None:
 
 
 @pytest.fixture
-def shared_run(tmp_path: pathlib.Path) -> tuple[pathlib.Path, list[str], np.ndarray]:
+def shared_run(
+    tmp_path: pathlib.Path,
+) -> tuple[pathlib.Path, list[str], NDArray[np.float32]]:
     """One run shared by both backends: same vectors, same order."""
     item_ids = [f"i_{i:04d}" for i in range(20)]
     root = tmp_path / "emb"
@@ -132,8 +136,8 @@ def shared_run(tmp_path: pathlib.Path) -> tuple[pathlib.Path, list[str], np.ndar
 # --------------------------------------------------------------------------- #
 def test_backends_agree_on_exact_search(
     clean_db: None,
-    pg_connection: object,
-    shared_run: tuple[pathlib.Path, list[str], np.ndarray],
+    pg_connection: Any,
+    shared_run: tuple[pathlib.Path, list[str], NDArray[np.float32]],
     tmp_path: pathlib.Path,
 ) -> None:
     root, item_ids, _vecs = shared_run
@@ -190,8 +194,8 @@ def test_backends_agree_on_exact_search(
 
 def test_backends_agree_with_filter(
     clean_db: None,
-    pg_connection: object,
-    shared_run: tuple[pathlib.Path, list[str], np.ndarray],
+    pg_connection: Any,
+    shared_run: tuple[pathlib.Path, list[str], NDArray[np.float32]],
     tmp_path: pathlib.Path,
 ) -> None:
     root, item_ids, _ = shared_run

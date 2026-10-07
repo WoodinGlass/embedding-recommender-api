@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import json
 import pathlib
+from typing import Any
 
 import numpy as np
 import pytest
 
 from recsys.retrieval.build import (
+    BuildResult,
     build_index,
     read_catalog_items,
     resolve_build_inputs,
@@ -118,12 +120,12 @@ def _write_catalog(path: pathlib.Path, item_ids: list[str]) -> None:
 
 
 def _build(
-    connection: object,
+    connection: Any,
     *,
     root: pathlib.Path,
     catalog: pathlib.Path,
     hnsw_ef_search: int = 100,
-) -> object:
+) -> BuildResult:
     inputs = resolve_build_inputs(root)
     items = read_catalog_items(catalog)
     return build_index(
@@ -137,15 +139,15 @@ def _build(
     )
 
 
-def _active_version(connection: object) -> str | None:
-    with connection.cursor() as cur:  # type: ignore[attr-defined]
+def _active_version(connection: Any) -> str | None:
+    with connection.cursor() as cur:
         cur.execute("SELECT index_version FROM index_registry WHERE status = 'active'")
         row = cur.fetchone()
     return None if row is None else str(row[0])
 
 
-def _status(connection: object, version: str) -> str:
-    with connection.cursor() as cur:  # type: ignore[attr-defined]
+def _status(connection: Any, version: str) -> str:
+    with connection.cursor() as cur:
         cur.execute(
             "SELECT status FROM index_registry WHERE index_version = %s",
             (version,),
@@ -182,7 +184,7 @@ def sample_catalog(tmp_path: pathlib.Path) -> pathlib.Path:
 # --------------------------------------------------------------------------- #
 def test_build_creates_building_row(
     clean_db: None,
-    pg_connection: object,
+    pg_connection: Any,
     sample_run: pathlib.Path,
     sample_catalog: pathlib.Path,
 ) -> None:
@@ -196,7 +198,7 @@ def test_build_creates_building_row(
 
 def test_build_is_idempotent(
     clean_db: None,
-    pg_connection: object,
+    pg_connection: Any,
     sample_run: pathlib.Path,
     sample_catalog: pathlib.Path,
 ) -> None:
@@ -206,27 +208,27 @@ def test_build_is_idempotent(
     assert second.index_version == first.index_version
 
     # Only one registry row.
-    with pg_connection.cursor() as cur:  # type: ignore[attr-defined]
+    with pg_connection.cursor() as cur:
         cur.execute("SELECT count(*) FROM index_registry")
-        count = int(cur.fetchone()[0])  # type: ignore[index]
+        count = int(cur.fetchone()[0])
     assert count == 1
 
 
 def test_build_populates_item_and_embedding_rows(
     clean_db: None,
-    pg_connection: object,
+    pg_connection: Any,
     sample_run: pathlib.Path,
     sample_catalog: pathlib.Path,
 ) -> None:
     result = _build(pg_connection, root=sample_run, catalog=sample_catalog)
-    with pg_connection.cursor() as cur:  # type: ignore[attr-defined]
+    with pg_connection.cursor() as cur:
         cur.execute("SELECT count(*) FROM item")
-        items = int(cur.fetchone()[0])  # type: ignore[index]
+        items = int(cur.fetchone()[0])
         cur.execute(
             "SELECT count(*) FROM embedding WHERE index_version = %s",
             (result.index_version,),
         )
-        embeddings = int(cur.fetchone()[0])  # type: ignore[index]
+        embeddings = int(cur.fetchone()[0])
     assert items == 4
     assert embeddings == 4
 
@@ -236,7 +238,7 @@ def test_build_populates_item_and_embedding_rows(
 # --------------------------------------------------------------------------- #
 def test_promote_activates_building_index(
     clean_db: None,
-    pg_connection: object,
+    pg_connection: Any,
     sample_run: pathlib.Path,
     sample_catalog: pathlib.Path,
 ) -> None:
@@ -251,7 +253,7 @@ def test_promote_activates_building_index(
 
 def test_promote_retires_previous_active(
     clean_db: None,
-    pg_connection: object,
+    pg_connection: Any,
     sample_run: pathlib.Path,
     sample_catalog: pathlib.Path,
     tmp_path: pathlib.Path,
@@ -279,7 +281,7 @@ def test_promote_retires_previous_active(
 
 def test_promote_already_active_is_noop(
     clean_db: None,
-    pg_connection: object,
+    pg_connection: Any,
     sample_run: pathlib.Path,
     sample_catalog: pathlib.Path,
 ) -> None:
@@ -289,25 +291,25 @@ def test_promote_already_active_is_noop(
     assert again.status == "already_active"
 
 
-def test_promote_rejects_unknown_index(clean_db: None, pg_connection: object) -> None:
+def test_promote_rejects_unknown_index(clean_db: None, pg_connection: Any) -> None:
     with pytest.raises(PromoteError, match="not found"):
         promote(pg_connection, target_index_version="idx-doesnotexist")
 
 
 def test_promote_rejects_incomplete_build(
     clean_db: None,
-    pg_connection: object,
+    pg_connection: Any,
     sample_run: pathlib.Path,
     sample_catalog: pathlib.Path,
 ) -> None:
     built = _build(pg_connection, root=sample_run, catalog=sample_catalog)
     # Simulate a build that recorded the wrong row_count.
-    with pg_connection.cursor() as cur:  # type: ignore[attr-defined]
+    with pg_connection.cursor() as cur:
         cur.execute(
             "UPDATE index_registry SET row_count = 999 WHERE index_version = %s",
             (built.index_version,),
         )
-    pg_connection.commit()  # type: ignore[attr-defined]
+    pg_connection.commit()
 
     with pytest.raises(PromoteError, match="row_count=999"):
         promote(pg_connection, target_index_version=built.index_version)
@@ -318,7 +320,7 @@ def test_promote_rejects_incomplete_build(
 # --------------------------------------------------------------------------- #
 def test_rollback_reactivates_previous(
     clean_db: None,
-    pg_connection: object,
+    pg_connection: Any,
     sample_run: pathlib.Path,
     sample_catalog: pathlib.Path,
     tmp_path: pathlib.Path,
@@ -343,7 +345,7 @@ def test_rollback_reactivates_previous(
 
 def test_rollback_without_retired_index_fails(
     clean_db: None,
-    pg_connection: object,
+    pg_connection: Any,
     sample_run: pathlib.Path,
     sample_catalog: pathlib.Path,
 ) -> None:
@@ -359,7 +361,7 @@ def test_rollback_without_retired_index_fails(
 # --------------------------------------------------------------------------- #
 def test_at_most_one_active_enforced_by_database(
     clean_db: None,
-    pg_connection: object,
+    pg_connection: Any,
     sample_run: pathlib.Path,
     sample_catalog: pathlib.Path,
     tmp_path: pathlib.Path,
@@ -381,13 +383,13 @@ def test_at_most_one_active_enforced_by_database(
     import psycopg
 
     def _try_activate() -> None:
-        with pg_connection.cursor() as cur:  # type: ignore[attr-defined]
+        with pg_connection.cursor() as cur:
             cur.execute(
                 "UPDATE index_registry SET status = 'active' WHERE index_version = %s",
                 (second.index_version,),
             )
-        pg_connection.commit()  # type: ignore[attr-defined]
+        pg_connection.commit()
 
     with pytest.raises(psycopg.errors.UniqueViolation):
         _try_activate()
-    pg_connection.rollback()  # type: ignore[attr-defined]
+    pg_connection.rollback()
