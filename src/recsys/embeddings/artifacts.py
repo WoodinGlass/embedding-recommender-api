@@ -661,6 +661,13 @@ def iter_previous_batches(
         raise ValueError("batch_size must be positive")
     pq = _pq()
     pf = pq.ParquetFile(str(parquet))
+    # A Parquet with zero row groups (e.g. written by a test that only
+    # exercised an empty batch) has no rows. pyarrow 17 returned an empty
+    # iterator; pyarrow 18 raises "requested metadata for row group: -1"
+    # when the reader is asked for a batch. Checking up front is
+    # version-independent and states the intent.
+    if pf.metadata is None or pf.metadata.num_row_groups == 0:
+        return
     for batch in pf.iter_batches(
         batch_size=batch_size,
         columns=["item_id", "embedding", "content_hash"],

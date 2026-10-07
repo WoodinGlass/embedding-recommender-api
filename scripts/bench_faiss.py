@@ -196,6 +196,34 @@ def _topk_faiss(index: Any, q: NDArray[np.float32], k: int, ef_search: int) -> N
     return result
 
 
+def _exclude_seeds_from_topk(
+    topk_indices: NDArray[np.int64],
+    *,
+    item_ids: list[str],
+    seeds: set[str],
+    k: int,
+) -> NDArray[np.int64]:
+    """Return the first ``k`` indices whose item id is not a seed.
+
+    The query vector is the mean of the seed embeddings, so the seeds are
+    the nearest neighbours of their own mean. A recommender does not
+    recommend items the user already has; the evaluation runner applies
+    the same exclusion (see recsys.evaluation.runner). Without it here,
+    the benchmark's metrics would not be comparable to the evaluation
+    report's, and MRR would be pinned at 1/(n_seeds + 1) regardless of
+    index quality.
+    """
+    kept: list[int] = []
+    for idx in topk_indices:
+        iid = item_ids[int(idx)]
+        if iid in seeds:
+            continue
+        kept.append(int(idx))
+        if len(kept) == k:
+            break
+    return np.asarray(kept, dtype=np.int64)
+
+
 def _percentiles(latencies_ms: list[float]) -> dict[str, float]:
     arr = np.asarray(latencies_ms, dtype=np.float64)
     return {
@@ -248,10 +276,23 @@ def _measure_exact(
     item_ids: list[str],
     k: int,
 ) -> dict[str, Any]:
-    """Exact kNN: top-k per query + latency loop."""
-    # Top-k for every golden query (ground truth and the exact system's
-    # results, which are the same thing).
-    topk = [_topk_exact(vectors, q, k) for q in queries]
+    """Exact kNN: top-k per query + latency loop.
+
+    Retrieves ``k + len(seeds)`` neighbours and excludes the seeds so the
+    returned indices align with what a recommender would actually serve
+    (see _exclude_seeds_from_topk). Latency is measured on the raw k
+    search, not the over-fetch, so the number is the cost of a real query.
+    """
+    fetch_k = k + max((len(q.seed_item_ids) for q in golden_set.queries), default=0)
+    topk = [
+        _exclude_seeds_from_topk(
+            _topk_exact(vectors, q, fetch_k),
+            item_ids=item_ids,
+            seeds=set(golden_query.seed_item_ids),
+            k=k,
+        )
+        for q, golden_query in zip(queries, golden_set.queries, strict=True)
+    ]
 
     # Latency measurement, separate from the metric pass so the top-k
     # computation above does not pollute the timing.
@@ -283,6 +324,8 @@ def _measure_faiss(
     *,
     vectors: NDArray[np.float32],
     queries: list[NDArray[np.float32]],
+    golden_set: GoldenSet,
+    item_ids: list[str],
     k: int,
     m: int,
     ef_construction: int,
@@ -301,8 +344,18 @@ def _measure_faiss(
     index.add(vectors)
     build_s = time.perf_counter() - t0
 
-    # Metric pass (no timing).
-    topk = [_topk_faiss(index, q, k, ef_search) for q in queries]
+    # Metric pass (no timing). Over-fetch to exclude seeds; see
+    # _exclude_seeds_from_topk for why.
+    fetch_k = k + max((len(q.seed_item_ids) for q in golden_set.queries), default=0)
+    topk = [
+        _exclude_seeds_from_topk(
+            _topk_faiss(index, q, fetch_k, ef_search),
+            item_ids=item_ids,
+            seeds=set(golden_query.seed_item_ids),
+            k=k,
+        )
+        for q, golden_query in zip(queries, golden_set.queries, strict=True)
+    ]
 
     # Latency pass.
     for i in range(WARMUP_QUERIES):
@@ -406,7 +459,18 @@ def main(argv: list[str] | None = None) -> int:
         item_ids=item_ids,
         k=args.k,
     )
-    exact_topk = [_topk_exact(vectors, q, args.k) for q in queries]
+    # Recompute exact_topk for fidelity comparison, with the same seed
+    # exclusion the systems apply, so the two sides compare like-for-like.
+    exact_fetch_k = args.k + max((len(q.seed_item_ids) for q in golden_set.queries), default=0)
+    exact_topk = [
+        _exclude_seeds_from_topk(
+            _topk_exact(vectors, q, exact_fetch_k),
+            item_ids=item_ids,
+            seeds=set(golden_query.seed_item_ids),
+            k=args.k,
+        )
+        for q, golden_query in zip(queries, golden_set.queries, strict=True)
+    ]
     print(
         json.dumps(
             {
@@ -449,6 +513,8 @@ def main(argv: list[str] | None = None) -> int:
         result = _measure_faiss(
             vectors=vectors,
             queries=queries,
+            golden_set=golden_set,
+            item_ids=item_ids,
             k=args.k,
             m=args.hnsw_m,
             ef_construction=args.hnsw_ef_construction,

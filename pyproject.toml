@@ -98,10 +98,13 @@ churn = [
 # docs/adr/0003-plain-python-cli-for-embedding-pipeline.md.
 pipeline = [
   "embedding-recommender-api[inference]",
-  # pyarrow is pinned tightly: the Parquet API and the list<float32>
-  # representation used by the writer have both changed across minor
-  # releases. Bump deliberately and re-run the determinism suite.
-  "pyarrow>=17.0,<18.0",
+  # pyarrow <17 has no wheel for Python 3.13, and pyarrow <18 has no
+  # wheel for 3.13 either (the primary dev environment is Colab, which
+  # runs 3.13). The upper bound is kept below 19 so a future breaking
+  # change does not land silently; the exact version is recorded in
+  # every manifest (see docs/embedding-pipeline.md § 2), and the
+  # determinism suite re-runs on any bump.
+  "pyarrow>=17.0,<19.0",
 ]
 bench = [
   "faiss-cpu>=1.8,<2.0",
@@ -134,7 +137,7 @@ dev-lite = [
   # encoder protocol unit tests use numpy without pulling onnxruntime
   "numpy>=1.26,<3.0",
   # artifact writer unit tests use pyarrow without pulling the encoder
-  "pyarrow>=17.0,<18.0",
+  "pyarrow>=17.0,<19.0",
 ]
 # dev: full local environment. Superset of dev-lite.
 dev = [
@@ -219,7 +222,12 @@ exclude = ["scripts/sample_catalog_data.py"]
 # mypy
 # =============================================================================
 [tool.mypy]
-python_version = "3.11"
+# mypy parses transitive dependencies (in Colab, jax pulls in PEP 695
+# syntax that requires 3.12). The project targets 3.11 but the CI matrix
+# tests both 3.11 and 3.12; setting mypy to 3.12 lets it parse modern
+# stubs while still checking our code under ``strict``. Our own code
+# avoids 3.12-only syntax, and the 3.11 CI job would fail if it did not.
+python_version = "3.12"
 strict = true
 warn_unused_ignores = true
 warn_redundant_casts = true
@@ -241,8 +249,17 @@ module = [
   "redis.*",
   "yaml.*",
   "pyarrow.*",
+  "jax.*",
+  "jaxlib.*",
 ]
 ignore_missing_imports = true
+# Some transitive dependencies (in our case jax, pulled in by
+# transformers on Colab) use Python 3.12+ syntax. mypy parses their
+# stubs when resolving our imports from sentence-transformers, fails on
+# the syntax, and stops before checking our code. ``ignore_errors`` is
+# needed in addition to ``ignore_missing_imports`` because the error is
+# inside a stub mypy chose to load, not a "module not found".
+ignore_errors = true
 
 # =============================================================================
 # pytest
