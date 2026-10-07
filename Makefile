@@ -76,6 +76,10 @@ test-integration:  ## Integration tests, light tier (postgres/redis). Skips enco
 test-encoder:  ## Encoder parity tests. Requires the [inference,export] extra.
 	$(PY) -m pytest -q -m "integration and encoder"
 
+.PHONY: eval
+eval:  ## Run the offline evaluation and enforce the threshold gate (ADR-0010).
+	$(PY) scripts/eval.py
+
 .PHONY: coverage
 coverage:  ## Unit tests with coverage report.
 	$(PY) -m pytest -q -m unit --cov=src/recsys --cov-report=term-missing

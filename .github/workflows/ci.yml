@@ -178,6 +178,81 @@ jobs:
         run: make test-encoder
 
   # ---------------------------------------------------------------------------
+  # Evaluation gate: build an index, run offline evaluation, enforce thresholds
+  #
+  # This job is the M2 exit criterion. It provisions the same pgvector
+  # service container as test-integration, applies migrations, embeds the
+  # sample catalog, builds and promotes an index, and runs `make eval`.
+  # The gate fails the build when any metric is below its threshold or its
+  # absolute floor (ADR-0010).
+  #
+  # The report is uploaded as an artifact on every run, passing or failing,
+  # so a failure can be inspected after the fact.
+  # ---------------------------------------------------------------------------
+  evaluation:
+    name: evaluation gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [lint]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: recsys
+          POSTGRES_PASSWORD: recsys
+          POSTGRES_DB: recsys
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U recsys -d recsys"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://recsys:recsys@localhost:5432/recsys
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev-lite,db,pipeline,inference,export]"
+      - name: Ensure pgvector extension exists
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+          PGPASSWORD=recsys psql -h localhost -U recsys -d recsys -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      - name: Apply migrations
+        run: alembic upgrade head
+      - name: Produce ONNX artifact
+        run: python scripts/export_onnx.py --model sentence-transformers/all-MiniLM-L6-v2
+      - name: Embed the sample catalog
+        run: |
+          python -m recsys.embeddings.pipeline --mode=batch \
+            --catalog data/sample/catalog.jsonl \
+            --out artifacts/embeddings \
+            --quiet
+      - name: Build the index
+        run: python scripts/build_index.py > /tmp/build.json
+      - name: Promote the index
+        run: |
+          INDEX_VERSION=$(python -c "import json; print(json.load(open('/tmp/build.json'))['index_version'])")
+          echo "Promoting ${INDEX_VERSION}"
+          python scripts/promote_index.py --index-version "$INDEX_VERSION"
+      - name: Run the evaluation gate
+        run: make eval
+      - name: Upload evaluation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-report
+          path: evaluation/report.json
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
   # Docker build + smoke test of /healthz
   # ---------------------------------------------------------------------------
   docker-build:
