@@ -81,12 +81,19 @@ EXIT_COULD_NOT_RUN = 2
 def _env_commit() -> str:
     """Return the commit under test.
 
-    Prefers ``GITHUB_SHA`` (set by GitHub Actions), falls back to
-    ``git rev-parse HEAD``, and finally to ``"unknown"``.
+    Checks several environment variables GitHub Actions and similar CI
+    systems set (``GITHUB_SHA``, ``CI_COMMIT_SHA``, ``COMMIT_SHA``),
+    falls back to ``git rev-parse HEAD``, and finally to ``"unknown"``.
+    A value is considered valid only if it is a non-empty string after
+    stripping. The previous version returned the empty string when
+    ``GITHUB_SHA`` was set to ``""`` (which happens in some
+    configurations), producing ``"commit": ""`` in the report and
+    silently disabling the commit check in the gate.
     """
-    sha = os.environ.get("GITHUB_SHA")
-    if sha:
-        return sha
+    for key in ("GITHUB_SHA", "CI_COMMIT_SHA", "COMMIT_SHA"):
+        sha = os.environ.get(key, "").strip()
+        if sha:
+            return sha
     git = shutil.which("git")
     if git is None:
         return "unknown"
@@ -104,7 +111,8 @@ def _env_commit() -> str:
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
         return "unknown"
-    return out.stdout.strip()
+    sha = out.stdout.strip()
+    return sha if sha else "unknown"
 
 
 def _try_open_database() -> Any | None:
@@ -271,6 +279,43 @@ def _make_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _print_metrics_summary(
+    systems: dict[str, dict[str, float]],
+    *,
+    k: int,
+) -> None:
+    """Print a compact table of metrics to stderr.
+
+    The CI log shows the numbers directly, so a reviewer does not need to
+    download the report artifact to see what the gate compared against.
+    Stderr, not stdout: stdout is reserved for the single-line JSON
+    events the caller may parse.
+    """
+    recall_key = f"recall_at_{k}"
+    ndcg_key = f"ndcg_at_{k}"
+    headers = ("system", recall_key, ndcg_key, "mrr", "ann_recall_vs_exact")
+    rows: list[tuple[str, str, str, str, str]] = []
+    for name in sorted(systems):
+        m = systems[name]
+        rows.append(
+            (
+                name,
+                f"{m.get(recall_key, 0.0):.4f}",
+                f"{m.get(ndcg_key, 0.0):.4f}",
+                f"{m.get('mrr', 0.0):.4f}",
+                f"{m['ann_recall_vs_exact']:.4f}" if "ann_recall_vs_exact" in m else "n/a",
+            )
+        )
+    widths = [max(len(headers[i]), max((len(r[i]) for r in rows), default=0)) for i in range(5)]
+    sep = "  ".join("-" * w for w in widths)
+    header_line = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+    lines = ["", "=== evaluation metrics ===", header_line, sep]
+    for row in rows:
+        lines.append("  ".join(row[i].ljust(widths[i]) for i in range(5)))
+    lines.append("")
+    print("\n".join(lines), file=sys.stderr)
+
+
 def _read_catalog_item_ids(path: pathlib.Path) -> list[str]:
     """Read the item ids from a JSONL catalog."""
     ids: list[str] = []
@@ -382,6 +427,12 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
     )
+
+    # ---- Metrics summary (human-readable, on stderr) ------------------- #
+    # A compact table so the numbers are visible in the CI log without
+    # having to download the report artifact. Written to stderr because
+    # stdout is reserved for the single-line JSON events above.
+    _print_metrics_summary(systems, k=args.k)
 
     # ---- Gate ---------------------------------------------------------- #
     try:
