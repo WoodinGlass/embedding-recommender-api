@@ -33,3 +33,11 @@ Per `docs/contracts.md` § 6 (Change management):
 | [0002](0002-onnx-runtime-for-inference.md) | ONNX Runtime for embedding inference | Accepted |
 | [0003](0003-plain-python-cli-for-embedding-pipeline.md) | Plain Python CLI for the embedding pipeline | Accepted |
 | [0004](0004-versioned-runs-with-current-pointer.md) | Versioned run directories with an atomic `current` pointer | Accepted |
+| [0005](0005-m2-scope-retrieval-only.md) | M2 scope is retrieval only; re-ranking moves to M3 | Accepted |
+| [0006](0006-pgvector-schema.md) | pgvector schema, fixed embedding dimension, and the model-swap procedure | Accepted |
+| [0007](0007-index-version-identity.md) | `index_version` identity and collision handling | Accepted |
+| [0008](0008-filter-strategy.md) | Filtered ANN search — iterative scan, fallback, and version detection | Accepted |
+| [0009](0009-golden-set-and-metrics.md) | Golden set versioning, metrics, query encoding, and baselines | Accepted |
+| [0010](0010-evaluation-thresholds.md) | Evaluation thresholds — absolute floor, history, and the CI gate | Accepted |
+| [0011](0011-faiss-benchmark-methodology.md) | FAISS benchmark methodology and reproducibility | Accepted |
+| [0012](0012-backend-abstraction.md) | Backend abstraction, `NumpyBackend` for exact kNN, and pgvector in CI only | Accepted |
