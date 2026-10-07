@@ -1,0 +1,61 @@
+# =============================================================================
+# Evaluation thresholds (ADR-0010).
+#
+# The gate reads this file and compares it against evaluation/report.json.
+# A run below any threshold or any absolute floor fails the gate.
+#
+# Thresholds are chosen by a human after reviewing a measured baseline; they
+# are not auto-computed. Lowering a threshold requires a reason and a new
+# entry in thresholds_history.yaml. See docs/adr/0010-evaluation-thresholds.md.
+#
+# Values below are placeholders. They will be replaced after the first
+# `make eval` produces a measured report (M2.5f); the current values are
+# deliberately permissive so the CI job is green from the first commit.
+# =============================================================================
+schema_version: 1
+golden_set_version: "v1"
+
+# Absolute floors: a run below any floor fails the gate regardless of the
+# per-system thresholds. These encode the minimum quality this project
+# considers acceptable for the sample catalog. They are not derived from
+# theory; they are the maintainer's starting point and will be revised
+# once a real measurement exists.
+absolute_floor:
+  pgvector_hnsw:
+    recall_at_10: 0.70
+    ndcg_at_10: 0.65
+    mrr: 0.70
+    ann_recall_vs_exact: 0.90
+  exact_knn:
+    recall_at_10: 0.70
+    ndcg_at_10: 0.65
+    mrr: 0.70
+    ann_recall_vs_exact: 1.00
+
+# Per-system thresholds. Baselines have 0.00 because that is what they
+# should score -- there is no upward fluctuation to accommodate. A baseline
+# that fails 0.00 is a bug in the baseline, and failing the gate is the
+# correct response.
+pgvector_hnsw:
+  recall_at_10: 0.85
+  ndcg_at_10: 0.80
+  mrr: 0.85
+  ann_recall_vs_exact: 0.90
+
+exact_knn:
+  recall_at_10: 0.85
+  ndcg_at_10: 0.80
+  mrr: 0.85
+  ann_recall_vs_exact: 1.00
+
+popularity_synthetic:
+  recall_at_10: 0.00
+  ndcg_at_10: 0.00
+  mrr: 0.00
+  ann_recall_vs_exact: null
+
+random_baseline:
+  recall_at_10: 0.00
+  ndcg_at_10: 0.00
+  mrr: 0.00
+  ann_recall_vs_exact: null
