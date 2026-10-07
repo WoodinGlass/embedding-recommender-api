@@ -6,7 +6,7 @@
 
 Embedding-based recommendation service with low-latency ANN retrieval (target p95 < 200 ms), re-ranking, statistically valid A/B testing, monitoring, and automated deployment (Docker + CI/CD). It ships with offline evaluation, model/index versioning, fallbacks, and a churn-risk extension.
 
-> **Status:** in development. M0 (Foundation) is complete; see [Milestones](#milestones). Performance figures are targets until the M4 benchmark is published.
+> **Status:** in development. M0 (Foundation) and M1 (Embedding pipeline) are complete; see [Milestones](#milestones). Performance figures are targets until the M4 benchmark is published.
 
 ## What this is / is not
 
@@ -27,7 +27,7 @@ Embedding-based recommendation service with low-latency ANN retrieval (target p9
 
 ## Features
 
-1. **Embedding pipeline** — batch and incremental catalog embedding with versioned models and indexes.
+1. **Embedding pipeline** — batch and incremental catalog embedding with versioned models and indexes, atomic commit, and a three-tier determinism contract.
 2. **Similarity search with metadata filters** — target p95 < 200 ms on 100k+ items.
 3. **Re-ranking** — popularity, recency, and diversity (MMR).
 4. **Graceful degradation** — cold-start and fallback paths when the index or Redis is down.
@@ -42,7 +42,7 @@ Embedding-based recommendation service with low-latency ANN retrieval (target p9
 
 ```mermaid
 flowchart TB
-  subgraph OFFLINE["Offline / batch (Prefect or Airflow)"]
+  subgraph OFFLINE["Offline / batch (plain Python CLI; orchestration lands in M6)"]
     CAT[("Catalog")] --> EMB["Embed job<br/>ONNX encoder"]
     EMB --> IDX["Build HNSW index<br/>(new version)"]
     IDX --> EVAL["Offline eval gate<br/>Recall@k, NDCG, MRR"]
@@ -82,7 +82,7 @@ flowchart TB
 | Embeddings | sentence-transformers, exported to ONNX Runtime for fast CPU inference |
 | Vector search | pgvector (HNSW) by default; FAISS as a benchmark option |
 | Data and cache | PostgreSQL; Redis (cache and lightweight feature store) |
-| Pipelines and versioning | Prefect or Airflow (batch re-embed); DVC or MLflow (model registry) |
+| Pipelines and versioning | Plain Python CLI (orchestration deferred to M6); versioned artifact runs; DVC or MLflow for the registry |
 | Observability | Prometheus, Grafana, OpenTelemetry, structlog |
 | Quality | pytest, Ruff, mypy, pre-commit, Locust or k6 |
 | Infrastructure | Docker (multi-stage), docker-compose (dev), GitHub Actions, Terraform or Helm (optional) |
@@ -94,20 +94,22 @@ flowchart TB
 embedding-recommender-api/
 ├── src/recsys/
 │   ├── api/                # routers, schemas, middleware (auth, rate limit)
-│   ├── embeddings/         # encoder, batch pipeline, ONNX export
-│   ├── retrieval/          # ANN index, filtering, re-ranker
+│   ├── embeddings/         # preprocess, encoder, ONNX export, pipeline, artifacts
+│   ├── retrieval/          # ANN index, filtering, re-ranker (interface only; M2)
 │   ├── fallback/           # popularity and cold-start
 │   ├── experiments/        # assignment, logging, stats analysis
 │   ├── churn/              # features, model, scoring
 │   ├── monitoring/         # metrics, drift detection
 │   └── config/             # settings per environment
-├── pipelines/              # batch embed and index rebuild (flows/DAGs)
+├── pipelines/              # orchestration wrappers (M6)
 ├── evaluation/             # offline eval (Recall@k, NDCG, MRR), golden set
-├── migrations/             # Alembic
-├── data/                   # samples only; real data via DVC
+├── migrations/             # Alembic (M2)
+├── data/
+│   └── sample/             # sample catalog; real data via DVC
+├── scripts/                # generate_sample_catalog, export_onnx, embed, check_markers
 ├── tests/
 │   ├── unit/               # fast, no external services
-│   ├── integration/        # real PostgreSQL (pgvector) and Redis
+│   ├── integration/        # real PostgreSQL (pgvector) and Redis; encoder parity
 │   └── load/               # Locust / k6 scenarios
 ├── deploy/
 │   ├── docker/
@@ -117,6 +119,7 @@ embedding-recommender-api/
 ├── docs/
 │   ├── decisions.md        # pre-flight design decisions (locked)
 │   ├── contracts.md        # data, API, config, and telemetry contracts
+│   ├── embedding-pipeline.md  # M1 design: layout, atomicity, determinism tiers
 │   ├── runbook.md          # incident response procedures
 │   ├── api.md              # API summary (planned)
 │   └── adr/                # architecture decision records
@@ -143,10 +146,20 @@ git clone https://github.com/WoodinGlass/embedding-recommender-api.git
 cd embedding-recommender-api
 
 cp .env.example .env       # set API keys and database credentials
-make up                    # API, PostgreSQL (pgvector), Redis, Prometheus, Grafana
-make migrate               # apply Alembic migrations
-make seed                  # load the sample catalog from data/sample/
-make embed                 # embed the catalog, build the first index, and activate it
+
+# One-time: install the export extra and produce the ONNX artifact.
+pip install -e ".[export,pipeline,inference]"
+python scripts/export_onnx.py --model sentence-transformers/all-MiniLM-L6-v2
+
+# Embed the sample catalog and activate the first run.
+python -m recsys.embeddings.pipeline --mode=batch \
+  --catalog data/sample/catalog.jsonl \
+  --out artifacts/embeddings
+
+# The full local stack (API, PostgreSQL with pgvector, Redis, Prometheus,
+# Grafana) starts in M3 once the retrieval path lands.
+make up                    # (planned until M3)
+make migrate               # (planned until M2)
 ```
 
 Request recommendations (use a key from `API_KEYS` in your `.env`):
@@ -173,6 +186,8 @@ Settings are read from environment variables (see `.env.example`). Never commit 
 | `JWT_SECRET` | Signing secret when JWT auth is enabled | — |
 | `RATE_LIMIT_PER_MINUTE` | Per-key request limit | `600` |
 | `EMBEDDING_MODEL` | sentence-transformers model exported to ONNX | `sentence-transformers/all-MiniLM-L6-v2` |
+| `EMBEDDING_ONNX_PATH` | Directory holding `model.onnx` and its sidecars | `artifacts/onnx/sentence-transformers__all-MiniLM-L6-v2` |
+| `EMBEDDING_BATCH_SIZE` | Encode batch size for the pipeline | `64` |
 | `INDEX_BACKEND` | `pgvector` (default) or `faiss` (benchmark) | `pgvector` |
 | `HNSW_M`, `HNSW_EF_CONSTRUCTION` | Index build parameters | `16`, `64` |
 | `HNSW_EF_SEARCH` | Query-time recall/latency knob | `100` |
@@ -203,7 +218,7 @@ Example response from `POST /v1/recommend`:
   ],
   "meta": {
     "source": "ann",
-    "model_version": "minilm-onnx-v1",
+    "model_version": "minilm-onnx-v1+a3f9e021",
     "index_version": "idx-0003",
     "experiment": { "name": "rerank_mmr", "variant": "treatment" }
   }
@@ -212,17 +227,39 @@ Example response from `POST /v1/recommend`:
 
 Errors: `401`/`403` for auth, `422` for validation, `429` with `Retry-After` when rate limited, and `503` only when both ANN retrieval and the fallback fail. Interactive OpenAPI docs are served at `/docs`; a summary lives in `docs/api.md`.
 
+The recommend/events/churn endpoints currently return `503` with a milestone
+message. The schemas are final; implementations land in M3, M5, and M7.
+
 ## Embedding pipeline and index lifecycle
 
-- **Batch and incremental runs.** Every item carries a content hash. Incremental runs embed only new or changed items; batch runs re-embed the whole catalog, for example after a model upgrade.
-- **Versioning.** Each run records `model_version`, `catalog_snapshot`, and `index_version` in the registry (DVC or MLflow). Embeddings and indexes are written as new versions, never overwritten in place.
-- **Deterministic by design.** Pinned model version, fixed text preprocessing, stable item ordering, and fixed batch/thread settings: the same catalog snapshot and model version produce the same embeddings (checksum-verified). See [`docs/decisions.md`](docs/decisions.md) § 3 for the full determinism contract.
-- **Blue/green index swap.** A new index version is built next to the live one, evaluated against the golden set, warmed up, and then promoted by switching the active-version pointer. API instances pick up the new pointer without a restart, and the previous version is kept for instant rollback.
+- **Batch and incremental runs.** Every item carries a content hash. Incremental runs embed only new or changed items; batch runs re-embed the whole catalog, for example after a model upgrade. A run with no changes exits 0 with `status="no_changes"` and leaves the active run untouched.
+- **Versioned runs.** Each pipeline invocation writes its artifacts into `artifacts/embeddings/runs/<run_id>/` and updates the `current` pointer file **last**. `<run_id>` is `<ISO8601-Z>__<model_version>`. Rollback is a pointer swap; no file moves.
+- **Atomic commit.** The commit order is fixed and every step is an atomic `os.replace`: Parquet, then `manifest.json`, then `state.json`, then `current`. A crash anywhere earlier leaves the previous run in place.
+- **Locking.** Every run takes an exclusive `fcntl.flock` on `artifacts/embeddings/.lock`. `flock` is auto-released on process death. NFS is not supported (documented in `docs/adr/0004-versioned-runs-with-current-pointer.md`).
+- **Streaming reuse.** Reuse does not load the previous Parquet into memory: the pipeline walks it with `ParquetFile.iter_batches` and writes the output through a `ParquetBatchWriter`, one row group per batch. Peak memory is O(batch_size × dim).
+- **Pre-commit validation.** Every batch is checked for dtype, rank, row count, dimension, finiteness, unique ids, and L2 normalization before anything is written.
+- **Deterministic by design.** Pinned model version, fixed preprocessing (`PREPROCESSING_VERSION`), stable item ordering, and pinned thread settings. The same catalog snapshot and model version produce the same embeddings. See [`docs/embedding-pipeline.md`](docs/embedding-pipeline.md) for the full three-tier contract.
+- **Blue/green index swap.** A new index version is built next to the live one, evaluated against the golden set, warmed up, and then promoted by switching the active-version pointer. API instances pick up the new pointer without a restart, and the previous version is kept for instant rollback. *(M2)*
 
 ```bash
-make index-promote VERSION=idx-0004
-make index-rollback
+# Produce or refresh the ONNX artifact (skips if the SHA already matches).
+python scripts/export_onnx.py --model sentence-transformers/all-MiniLM-L6-v2
+
+# Batch embed the sample catalog; writes a new run and updates `current`.
+python -m recsys.embeddings.pipeline --mode=batch \
+  --catalog data/sample/catalog.jsonl \
+  --out artifacts/embeddings
+
+# Incremental: encodes only items whose content hash changed.
+python -m recsys.embeddings.pipeline --mode=incremental \
+  --catalog data/sample/catalog.jsonl \
+  --out artifacts/embeddings
 ```
+
+Stdout is a single JSON line (`pipeline.done` summary); per-batch progress
+goes to stderr as JSON lines and can be silenced with `--quiet`. Exit codes:
+`0` OK (including `no_changes`), `2` input error, `3` encoder error,
+`4` output error, `5` lock timeout.
 
 ## Retrieval, re-ranking, and fallback
 
@@ -239,10 +276,10 @@ make index-rollback
 
 ## Offline evaluation
 
-- **Golden set.** Query-to-relevant-items pairs in `evaluation/`, versioned with DVC.
+- **Golden set.** Query-to-relevant-items pairs in `evaluation/golden_set/queries.yaml`, committed. Larger sets are versioned with DVC. The committed set has 20 queries, one per topic, each with three seed items and seven relevant items drawn from the same topic cluster.
 - **Retrieval quality.** Recall@k, NDCG@k, and MRR against the golden labels.
 - **ANN fidelity.** Overlap with exact (brute-force) kNN, so index tuning is not mistaken for a relevance change.
-- **CI gate.** `make eval` writes a JSON report and fails if any metric drops below `evaluation/thresholds.yaml`. CI runs it on a small fixture set to stay fast; the full golden set runs before every index promotion.
+- **CI gate.** `make eval` writes a JSON report and fails if any metric drops below `evaluation/thresholds.yaml`. CI runs it on the committed golden set to stay fast; the full set runs before every index promotion. *(M2)*
 
 Results (filled in during M2; only measured numbers belong here):
 
@@ -261,7 +298,7 @@ Results (filled in during M2; only measured numbers belong here):
 - **Validity checks.** A sample ratio mismatch (SRM) check using a chi-square test (alert at p < 0.001) runs before any result is read.
 - **Analysis.** Two-proportion z-test for rates, Welch's t-test for continuous metrics, confidence intervals, and Holm correction across multiple metrics. Analysis is fixed-horizon: results are read only after the planned sample size is reached.
 - **Guardrails.** p95 latency, error rate, and fallback rate are compared per variant; a variant that breaches a guardrail is flagged regardless of primary-metric lift.
-- **Proof it works.** `make ab-simulate` replays synthetic traffic with known effects. A/A runs should produce false positives at about the chosen significance level, and A/B runs with an injected lift should be detected at the planned power.
+- **Proof it works.** `make ab-simulate` replays synthetic traffic with known effects. A/A runs should produce false positives at about the chosen significance level, and A/B runs with an injected lift should be detected at the planned power. *(M5)*
 
 ```bash
 python -m recsys.experiments.analyze --experiment rerank_mmr
@@ -272,9 +309,9 @@ python -m recsys.experiments.analyze --experiment rerank_mmr
 - **Metrics** (Prometheus, `/metrics`): `recsys_request_duration_seconds` (histogram by route, source, and status), `recsys_cache_requests_total{result}`, `recsys_fallback_total{reason}`, `recsys_errors_total{type}`, `recsys_embedding_drift_score`, and `recsys_active_index_info{index_version,model_version}`. Histogram buckets include 0.2 s so the latency target is directly measurable.
 - **p95 query:** `histogram_quantile(0.95, sum by (le) (rate(recsys_request_duration_seconds_bucket{route="/v1/recommend"}[5m])))`
 - **Tracing and logs.** OpenTelemetry spans around cache, ANN query, re-rank, and fallback. structlog JSON logs carry `request_id` and `trace_id`, with no raw PII.
-- **Drift.** Recent query and item embeddings are compared with a reference window using centroid cosine shift and PSI over the top PCA components.
-- **Alerts.** p95 > 200 ms for 10 minutes; 5xx rate > 1% for 5 minutes; sustained fallback-rate spike; sharp drop in cache hit rate; drift score above threshold; SRM detected in a running experiment.
-- **Dashboards.** Grafana JSON in `dashboards/` (service health, cache and fallback, drift, experiments).
+- **Drift.** Recent query and item embeddings are compared with a reference window using centroid cosine shift and PSI over the top PCA components. *(M4)*
+- **Alerts.** p95 > 200 ms for 10 minutes; 5xx rate > 1% for 5 minutes; sustained fallback-rate spike; sharp drop in cache hit rate; drift score above threshold; SRM detected in a running experiment. *(M4)*
+- **Dashboards.** Grafana JSON in `dashboards/` (service health, cache and fallback, drift, experiments). *(M4)*
 
 The full metric and log-field contract — including cardinality guardrails and forbidden log fields — lives in [`docs/contracts.md`](docs/contracts.md) § 4.
 
@@ -285,9 +322,9 @@ The full metric and log-field contract — including cardinality guardrails and 
 **Method:** Locust scenarios in `tests/load/`. Latency comes from the server-side Prometheus histogram and is cross-checked against client-side percentiles. Warm-cache and cold-cache runs are reported separately, and every result records hardware, dataset size, and commit SHA.
 
 ```bash
-make seed-synthetic N=100000
-make embed
-make load-test
+make seed-synthetic N=100000   # planned
+python -m recsys.embeddings.pipeline --mode=batch
+make load-test                 # planned
 ```
 
 Results (filled in during M4):
@@ -306,20 +343,20 @@ A separate router (`/v1/churn/*`) and package (`recsys.churn`) built on the same
 - **Model.** Baseline logistic regression, then gradient-boosted trees (scikit-learn). The better model is registered and served.
 - **Labels and splits.** Churn means no activity within a configurable window. Train, validation, and test splits are time-based to prevent leakage.
 - **Evaluation.** ROC-AUC and calibration (reliability curve, Brier score), reported in `docs/`.
-- **Monitoring.** Feature and score drift appear on the same dashboards as embedding drift.
+- **Monitoring.** Feature and score drift appear on the same dashboards as embedding drift. *(M7)*
 
 ## Deployment and CI/CD
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `ci.yml` | Pull request, push to `main` | Ruff, mypy, test-marker discipline, unit tests (matrix on 3.11 and 3.12), integration tests against PostgreSQL (pgvector) and Redis service containers, Docker build and smoke test of `/healthz`, `/readyz`, `/metrics` |
+| `ci.yml` | Pull request, push to `main` | Ruff, mypy, test-marker discipline; unit tests on a matrix of 3.11 and 3.12; integration tests against PostgreSQL (pgvector) and Redis service containers; a dedicated encoder job that runs ONNX parity and the full three-tier determinism contract; Docker build and smoke test of `/healthz`, `/readyz`, `/metrics` |
 | `cd.yml` | Push to `main` | Build and push the image (tagged with the git SHA), deploy to staging, run smoke tests and the eval gate, promote to production after approval, auto-rollback if readiness or SLO checks fail *(planned)* |
 | `security.yml` | Pull request, nightly | Trivy scans (filesystem and image), dependency review *(planned)* |
 
 - **Image.** Multi-stage Dockerfile; builder installs into a virtualenv, runtime copies only the virtualenv and runs as uid 1000 `recsys`. `docker-compose.yml` is for local development only.
 - **Orchestration.** Rolling updates with readiness probes (`deploy/k8s`). Terraform (`deploy/terraform`) is optional.
-- **Rollback.** Code rollback redeploys the previous image tag. Index rollback is independent (`make index-rollback`).
-- **Dependencies.** Dependabot is configured in `.github/dependabot.yml`.
+- **Rollback.** Code rollback redeploys the previous image tag. Embedding-run rollback is a pointer swap in `artifacts/embeddings/current`. Index rollback is independent (`make index-rollback`, M2).
+- **Dependencies.** Dependabot is configured in `.github/dependabot.yml` *(planned)*.
 
 ## Security
 
@@ -346,23 +383,26 @@ do not use:
 | Extra | Contents | When to use |
 |---|---|---|
 | `[dev-lite]` | API + observability + test/quality tooling. **No torch.** | CI lint and unit jobs; fast local iteration. |
-| `[dev]` | Superset of `[dev-lite]` plus embeddings, experiments, churn, bench, and load. | Full local development once M1+ touches the encoder. |
+| `[inference]` | numpy + onnxruntime + tokenizers. **No torch.** | Serving path, and anything that loads a `.onnx` artifact. |
+| `[export]` | sentence-transformers + onnx. Pulls torch. | Producing a new ONNX artifact; the encoder parity test. |
+| `[pipeline]` | `[inference]` + pyarrow. | The batch/incremental embedding pipeline and artifact I/O. |
+| `[dev]` | Superset of `[dev-lite]` plus embeddings, experiments, churn, bench, and load. | Full local development. |
 
 | Command | What it does |
 |---|---|
-| `make up` / `make down` | Start / stop the full local stack (Docker Compose) |
+| `make up` / `make down` | Start / stop the full local stack (Docker Compose) *(planned until M3)* |
 | `make fmt` | Ruff auto-fix and format |
 | `make lint` | Ruff check and format-check, no modifications |
 | `make typecheck` | mypy in strict mode |
 | `make check-markers` | Enforce test-tier discipline (unit tests must not require external services) |
 | `make test` | Unit + integration tests (integration skips without `RECSYS_TEST_*` env) |
 | `make test-unit` | Unit tests only |
-| `make test-integration` | Integration tests only |
+| `make test-integration` | Integration tests, light tier (PostgreSQL / Redis); skips encoder parity |
+| `make test-encoder` | Encoder parity and the three-tier determinism contract. Requires `[inference,export,pipeline]` |
 | `make coverage` | Unit tests with coverage report |
 | `make clean` | Remove caches and build artifacts |
 | `make migrate` | Apply Alembic migrations *(planned)* |
 | `make seed` | Load the sample catalog; `make seed-synthetic N=100000` generates one *(planned)* |
-| `make embed` | Run the embedding pipeline and build a new index version *(planned)* |
 | `make index-promote VERSION=<v>` | Switch the active index; `make index-rollback` reverts *(planned)* |
 | `make eval` | Offline evaluation with threshold gate *(planned)* |
 | `make load-test` | Locust load test against the local stack *(planned)* |
@@ -370,11 +410,11 @@ do not use:
 
 Test layers:
 
-- `tests/unit` covers pure logic: assignment hashing, statistics, re-ranking, and fallback selection.
-- `tests/integration` runs the API against real PostgreSQL (pgvector) and Redis, including failure paths such as Redis down or index unavailable. These skip cleanly unless `RECSYS_TEST_DATABASE_URL` and `RECSYS_TEST_REDIS_URL` are set.
+- `tests/unit` covers pure logic: preprocessing rules, encoder protocol conformance, artifact primitives (locking, atomic writes, config hashing, run-id allocation, state validation, Parquet I/O), catalog loading, mode planning, assignment hashing, statistics, re-ranking, and fallback selection.
+- `tests/integration` runs the API against real PostgreSQL (pgvector) and Redis, plus the encoder tier: ONNX-vs-reference parity, and the full three-tier determinism contract (`tests/integration/test_determinism_tiers.py`). These skip cleanly unless the relevant env vars or extras are present.
 - `tests/load` holds the Locust (or k6) scenarios for the latency target.
 
-Pull requests must pass CI. Architectural changes need an ADR in `docs/adr/` — see the [ADR index](docs/adr/README.md) for the convention and the two accepted records (pgvector as default, ONNX Runtime for inference).
+Pull requests must pass CI. Architectural changes need an ADR in `docs/adr/` — see the [ADR index](docs/adr/README.md) for the convention and the four accepted records (pgvector as default, ONNX Runtime for inference, plain Python CLI for the pipeline, versioned runs with an atomic current pointer).
 
 ## Design decisions and trade-offs
 
@@ -383,6 +423,8 @@ Pull requests must pass CI. Architectural changes need an ADR in `docs/adr/` —
 | pgvector as the default vector store | One datastore for vectors and metadata, transactional filtering, simple operations | Lower throughput ceiling and fewer tuning options than dedicated engines; the FAISS benchmark quantifies the gap |
 | HNSW over IVFFlat | Better recall/latency trade-off and no training step | Higher memory use and slower index builds |
 | ONNX Runtime for encoding | Faster CPU inference and a smaller runtime footprint | Extra export step; parity with the original model is verified in tests |
+| Plain Python CLI for the pipeline | Debuggable anywhere, stable integration surface, no scheduler to install | No retries or scheduling until M6, when an orchestrator wraps the CLI |
+| Versioned runs with an atomic `current` pointer | A crash cannot leave a state file pointing at a missing artifact; rollback is a pointer swap | Old runs accumulate on disk until a prune target is added |
 | Redis cache keyed by index version and variant | Lower p95 for repeated queries; swaps and A/B arms never serve stale or mixed results | Staleness within the TTL; one more moving part (bypassed on failure) |
 | Fallback instead of failing | Availability over freshness | Lower relevance while degraded, tracked through fallback rate and guardrails |
 | Hash-based experiment assignment | Stateless, reproducible, consistent across instances | No dynamic re-allocation without re-bucketing users |
@@ -390,15 +432,14 @@ Pull requests must pass CI. Architectural changes need an ADR in `docs/adr/` —
 | Offline evaluation as a CI gate | Catches regressions before deploy | Offline metrics do not guarantee online lift, which is why A/B testing exists |
 
 For the full reasoning behind these choices — including the alternatives that
-were considered and rejected — see `docs/adr/0001-pgvector-as-default.md` and
-`docs/adr/0002-onnx-runtime-for-inference.md`.
+were considered and rejected — see the ADRs under [`docs/adr/`](docs/adr/).
 
 ## Milestones
 
 | # | Milestone | Scope | Exit criteria | Status |
 |---|---|---|---|---|
 | M0 | Foundation | Repo, CI (lint, type check, test), Docker, pre-commit, first ADR | CI is green on the scaffold; the `docker-build` job builds the image and serves `/healthz`, `/readyz`, and `/metrics` in a container | Done |
-| M1 | Embedding pipeline | Batch and incremental embedding, model/index versioning, golden set | Re-running the pipeline produces identical results | Planned |
+| M1 | Embedding pipeline | Batch and incremental embedding, model/index versioning, golden set | Re-running the pipeline produces identical results | Done |
 | M2 | Retrieval and offline evaluation | pgvector HNSW, benchmark vs FAISS, Recall@k / NDCG / MRR | Metrics are documented and enforced as a CI gate | Planned |
 | M3 | Production API | Auth, rate limiting, caching, fallback, health checks | Integration tests are green | Planned |
 | M4 | Observability and load test | Prometheus/Grafana, tracing, Locust | p95 < 200 ms at the target RPS, with evidence committed in `docs/` | Planned |
@@ -412,6 +453,13 @@ were considered and rejected — see `docs/adr/0001-pgvector-as-default.md` and
 > in a container" is therefore proven in the CI `docker-build` job's smoke test
 > (which starts the freshly built image and curls `/healthz`, `/readyz`, and
 > `/metrics`), not by a local `make up`.
+
+> **Note on the M1 exit criteria.** "Identical results" is enforced at three
+> tiers, defined in [`docs/embedding-pipeline.md`](docs/embedding-pipeline.md) § 5
+> and tested in `tests/integration/test_determinism_tiers.py`: byte-identical
+> Parquet in the pinned CI environment (strict), identical top-k neighbours
+> everywhere (semantic), and per-row cosine similarity ≥ 0.9999 (tolerance).
+> Only the strict tier is CI-only; the other two run on every `make test-encoder`.
 
 ## License
 
