@@ -111,6 +111,22 @@ def test_is_ready_always_true() -> None:
     assert be.is_ready() is True
 
 
+def test_embedding_for_returns_stored_vector() -> None:
+    be = _backend()
+    v = be.embedding_for("i_0001")
+    assert v is not None
+    assert v.shape == (4,)
+    # Round trip: querying with the returned vector makes i_0001 the top hit.
+    results = be.search(vector=v, k=1)
+    assert results[0][0] == "i_0001"
+    assert results[0][1] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_embedding_for_returns_none_for_unknown_id() -> None:
+    be = _backend()
+    assert be.embedding_for("no-such-id") is None
+
+
 # --------------------------------------------------------------------------- #
 # search: basic behavior
 # --------------------------------------------------------------------------- #

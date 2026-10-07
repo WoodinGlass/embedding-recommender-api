@@ -140,6 +140,22 @@ class NumpyBackend:
         """
         return True
 
+    def embedding_for(self, item_id: str) -> NDArray[np.float32] | None:
+        """Return the stored vector for ``item_id``, or ``None`` if unknown.
+
+        The evaluation runner uses this to build a query vector from the
+        seed items of a golden query without re-reading the artifact tree.
+        A lookup that misses returns ``None`` rather than raising: a
+        missing seed is a data problem the caller may want to tolerate if
+        at least one other seed is available (see
+        ``recsys.evaluation.runner.encode_query``).
+        """
+        idx = self._index_of.get(item_id)
+        if idx is None:
+            return None
+        row: NDArray[np.float32] = self._embeddings[idx, :]
+        return row
+
     # ---------------------------------------------------------------- search
     def search(
         self,

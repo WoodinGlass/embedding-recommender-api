@@ -373,6 +373,63 @@ def test_gate_ignores_system_not_in_thresholds(tmp_path: pathlib.Path) -> None:
     assert result.passed is True
 
 
+def test_gate_fails_when_required_system_missing(tmp_path: pathlib.Path) -> None:
+    p = tmp_path / "t.yaml"
+    _write_thresholds(
+        p,
+        absolute_floor={},
+        per_system={"pgvector_hnsw": {"recall_at_10": 0.0}},
+    )
+    t = load_thresholds(p)
+    report = _report(systems={"random_baseline": {"metrics": {"recall_at_10": 0.5}}})
+    result = evaluate_gate(
+        t,
+        report,
+        current_commit="abc123",
+        now=None,
+        required_systems=["pgvector_hnsw", "random_baseline"],
+    )
+    assert result.passed is False
+    assert "pgvector_hnsw" in (result.reason or "")
+
+
+def test_gate_passes_when_all_required_systems_present(
+    tmp_path: pathlib.Path,
+) -> None:
+    p = tmp_path / "t.yaml"
+    _write_thresholds(
+        p,
+        absolute_floor={},
+        per_system={"pgvector_hnsw": {"recall_at_10": 0.0}},
+    )
+    t = load_thresholds(p)
+    result = evaluate_gate(
+        t,
+        _report(),
+        current_commit="abc123",
+        now=None,
+        required_systems=["pgvector_hnsw"],
+    )
+    assert result.passed is True
+
+
+def test_gate_no_required_systems_does_not_check(
+    tmp_path: pathlib.Path,
+) -> None:
+    p = tmp_path / "t.yaml"
+    _write_thresholds(
+        p,
+        absolute_floor={},
+        per_system={"pgvector_hnsw": {"recall_at_10": 0.0}},
+    )
+    t = load_thresholds(p)
+    # The report has an unrelated system only, and no required_systems is
+    # given, so the gate passes.
+    report = _report(systems={"random_baseline": {"metrics": {"recall_at_10": 0.5}}})
+    result = evaluate_gate(t, report, current_commit="abc123", now=None)
+    assert result.passed is True
+
+
 def test_gate_missing_systems_fails(tmp_path: pathlib.Path) -> None:
     p = tmp_path / "t.yaml"
     _write_thresholds(

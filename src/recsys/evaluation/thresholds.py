@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import datetime as dt
 import pathlib
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -157,6 +158,7 @@ def evaluate_gate(
     current_commit: str | None = None,
     now: dt.datetime | None = None,
     max_report_age_hours: float | None = 24.0,
+    required_systems: Sequence[str] | None = None,
 ) -> GateResult:
     """Compare a report to the thresholds. Pure function.
 
@@ -164,7 +166,13 @@ def evaluate_gate(
     ``commit`` field must match. ``now`` and ``max_report_age_hours``
     control the freshness check; passing ``now=None`` skips it.
 
-    See module docstring for what is and is not checked.
+    ``required_systems``, when given, is a list of system names that must
+    appear in the report. A required system that is missing is a failure:
+    a silently skipped system is the same as a disabled gate. When
+    ``None``, the report is not required to contain any particular
+    system.
+
+    See module docstring for what else is and is not checked.
     """
     # 1. Golden set version
     report_gsv = report.get("golden_set_version")
@@ -209,6 +217,17 @@ def evaluate_gate(
                 passed=False,
                 reason=(f"report is {age_hours:.1f}h old; max is {max_report_age_hours:.1f}h"),
             )
+
+    # 3b. Required systems present
+    if required_systems is not None:
+        systems_obj = report.get("systems")
+        if isinstance(systems_obj, dict):
+            missing = [s for s in required_systems if s not in systems_obj]
+            if missing:
+                return GateResult(
+                    passed=False,
+                    reason=(f"required system(s) missing from report: {sorted(missing)}"),
+                )
 
     # 4. Metrics
     failures: list[MetricFailure] = []
