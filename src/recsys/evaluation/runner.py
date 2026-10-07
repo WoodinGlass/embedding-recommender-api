@@ -138,8 +138,15 @@ def evaluate_system(
 
     for query in golden_set.queries:
         query_vec = encode_query(query.seed_item_ids, embedding_lookup=embedding_lookup)
-        pairs = backend.search(vector=query_vec, k=k)
-        retrieved = [iid for iid, _ in pairs]
+        # Over-fetch to allow seed exclusion; see the docstring above.
+        # The backend protocol does not carry an exclude list, so the
+        # caller retrieves more and filters. This is also what the M3
+        # serving layer will do (retrieve more, filter, truncate).
+        seeds = set(query.seed_item_ids)
+        fetch_k = k + len(seeds)
+        pairs = backend.search(vector=query_vec, k=fetch_k)
+        filtered = [(iid, s) for iid, s in pairs if iid not in seeds][:k]
+        retrieved = [iid for iid, _ in filtered]
         relevant = set(query.relevant_item_ids)
 
         r = recall_at_k(retrieved, relevant, k)
@@ -151,8 +158,9 @@ def evaluate_system(
 
         fidelity: float | None = None
         if exact_backend is not None:
-            exact_pairs = exact_backend.search(vector=query_vec, k=k)
-            exact_ids = [iid for iid, _ in exact_pairs]
+            exact_pairs = exact_backend.search(vector=query_vec, k=fetch_k)
+            exact_filtered = [(iid, s) for iid, s in exact_pairs if iid not in seeds][:k]
+            exact_ids = [iid for iid, _ in exact_filtered]
             fidelity = ann_recall_vs_exact(retrieved, exact_ids, k)
             fidelity_values.append(fidelity)
 

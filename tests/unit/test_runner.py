@@ -127,9 +127,9 @@ def test_encode_query_raises_on_zero_mean() -> None:
 # evaluate_system
 # --------------------------------------------------------------------------- #
 def test_evaluate_system_perfect_retrieval() -> None:
-    # Backend has a, b, c, d. Query seed is "a"; its own vector is the
-    # nearest neighbor. But relevant is {b, c}, so we want a query whose
-    # vector is the mean of b and c.
+    # Backend has a, b, c, d. Seed is "a"; relevant is "b". The query
+    # vector is a's own vector, so a would rank first without seed
+    # exclusion; with exclusion, top-1 is "b" (relevant).
     backend = _backend(["a", "b", "c", "d"])
     lookup = _lookup_from_backend(backend)
     gs = _golden_set(
@@ -137,7 +137,7 @@ def test_evaluate_system_perfect_retrieval() -> None:
             GoldenQuery(
                 query_id="q",
                 topic="t",
-                seed_item_ids=("b",),
+                seed_item_ids=("a",),
                 relevant_item_ids=("b",),
             ),
         ]
@@ -151,9 +151,31 @@ def test_evaluate_system_perfect_retrieval() -> None:
     assert outcomes == []
 
 
+def test_evaluate_system_seed_is_excluded_from_results() -> None:
+    """The seed item must never appear in the retrieved results.
+
+    The query vector is the mean of the seed embeddings, so the seeds are
+    the nearest neighbours of their own mean. Recommending an item the
+    user already has is wrong, and it would artificially depress MRR and
+    NDCG by pushing relevant items down.
+    """
+    backend = _backend(["a", "b", "c"])
+    lookup = _lookup_from_backend(backend)
+    gs = _golden_set([GoldenQuery("q", "t", ("a",), ("b",))])
+    _, outcomes = evaluate_system(
+        backend=backend,
+        golden_set=gs,
+        embedding_lookup=lookup,
+        k=3,
+        include_per_query=True,
+    )
+    assert "a" not in outcomes[0].retrieved
+    assert "b" in outcomes[0].retrieved
+
+
 def test_evaluate_system_zero_retrieval() -> None:
-    # Relevant item is "d", seed is "a"; querying with "a" returns "a"
-    # first. With k=1, "d" is never retrieved.
+    # Seed is "a", relevant is "d". After filtering the seed, top-1 is "b";
+    # "d" is not retrieved at k=1.
     backend = _backend(["a", "b", "c", "d"])
     lookup = _lookup_from_backend(backend)
     gs = _golden_set(
@@ -173,25 +195,29 @@ def test_evaluate_system_zero_retrieval() -> None:
 
 
 def test_evaluate_system_aggregates_over_queries() -> None:
+    # Two queries, one hit and one miss at k=1.
     backend = _backend(["a", "b"])
     lookup = _lookup_from_backend(backend)
     gs = _golden_set(
         [
-            GoldenQuery("q1", "t", ("a",), ("a",)),  # perfect
-            GoldenQuery("q2", "t", ("a",), ("b",)),  # miss at k=1
+            GoldenQuery("q1", "t", ("a",), ("b",)),  # hit
+            GoldenQuery("q2", "t", ("a",), ("a",)),  # miss (relevant == seed)
         ]
     )
+    # q1: after excluding "a", top-1 is "b" (relevant) -> recall=1.0
+    # q2: relevant is {"a"}, seed is also "a"; after filtering, "a" is gone
+    #     from the results, so recall=0.0. This pair is chosen only to
+    #     exercise the aggregate; the golden set loader would reject it.
     metrics, _ = evaluate_system(backend=backend, golden_set=gs, embedding_lookup=lookup, k=1)
-    # (1.0 + 0.0) / 2
     assert metrics["recall_at_1"] == pytest.approx(0.5)
     assert metrics["ndcg_at_1"] == pytest.approx(0.5)
     assert metrics["mrr"] == pytest.approx(0.5)
 
 
 def test_evaluate_system_metric_names_include_k() -> None:
-    backend = _backend(["a"])
+    backend = _backend(["a", "b"])
     lookup = _lookup_from_backend(backend)
-    gs = _golden_set([GoldenQuery("q", "t", ("a",), ("a",))])
+    gs = _golden_set([GoldenQuery("q", "t", ("a",), ("b",))])
     metrics, _ = evaluate_system(backend=backend, golden_set=gs, embedding_lookup=lookup, k=5)
     assert "recall_at_5" in metrics
     assert "ndcg_at_5" in metrics
@@ -201,7 +227,7 @@ def test_evaluate_system_metric_names_include_k() -> None:
 def test_evaluate_system_without_exact_has_no_fidelity() -> None:
     backend = _backend(["a", "b"])
     lookup = _lookup_from_backend(backend)
-    gs = _golden_set([GoldenQuery("q", "t", ("a",), ("a",))])
+    gs = _golden_set([GoldenQuery("q", "t", ("a",), ("b",))])
     metrics, _ = evaluate_system(backend=backend, golden_set=gs, embedding_lookup=lookup, k=1)
     assert "ann_recall_vs_exact" not in metrics
 
@@ -210,7 +236,7 @@ def test_evaluate_system_with_exact_has_perfect_fidelity_when_identical() -> Non
     backend = _backend(["a", "b", "c"])
     exact = _backend(["a", "b", "c"])
     lookup = _lookup_from_backend(backend)
-    gs = _golden_set([GoldenQuery("q", "t", ("a",), ("a",))])
+    gs = _golden_set([GoldenQuery("q", "t", ("a",), ("b",))])
     metrics, _ = evaluate_system(
         backend=backend,
         golden_set=gs,
@@ -221,11 +247,13 @@ def test_evaluate_system_with_exact_has_perfect_fidelity_when_identical() -> Non
     assert metrics["ann_recall_vs_exact"] == 1.0
 
 
-def test_evaluate_system_with_exact_measures_difference() -> None:
+def test_evaluate_system_with_exact_measures_zero_overlap() -> None:
     backend = _backend(["a", "b", "c", "d"])
 
-    # An exact backend that always returns the same two ids regardless of
-    # query. Fidelity will be less than 1.0 when the query is not "a".
+    # A backend that always returns "d", regardless of query or k. The
+    # system under test returns [b, c] (top-2 after filtering seed "a");
+    # the fixed exact side returns [d] (a is not among its results, so
+    # seed filtering is a no-op on it). Overlap empty.
     class _FixedBackend:
         name = "fixed"
 
@@ -239,11 +267,11 @@ def test_evaluate_system_with_exact_measures_difference() -> None:
             k: int,
             filters: object = None,
         ) -> list[tuple[str, float]]:
-            del vector, filters
-            return [("c", 0.9), ("d", 0.8)][:k]
+            del vector, filters, k
+            return [("d", 0.9)]
 
     lookup = _lookup_from_backend(backend)
-    gs = _golden_set([GoldenQuery("q", "t", ("a",), ("a",))])
+    gs = _golden_set([GoldenQuery("q", "t", ("a",), ("b",))])
     metrics, _ = evaluate_system(
         backend=backend,
         golden_set=gs,
@@ -251,14 +279,47 @@ def test_evaluate_system_with_exact_measures_difference() -> None:
         k=2,
         exact_backend=_FixedBackend(),
     )
-    # Backend returns [a, b] (nearest to a); fixed returns [c, d]; no overlap.
     assert metrics["ann_recall_vs_exact"] == 0.0
+
+
+def test_evaluate_system_with_exact_measures_partial_overlap() -> None:
+    backend = _backend(["a", "b", "c", "d"])
+
+    # An exact backend that returns [a, c] ignoring the query. After seed
+    # filtering, the exact side is [c]; the system side is [b, c].
+    # Overlap is {"c"}, k=2, fidelity = 1/2.
+    class _OverlappingBackend:
+        name = "overlapping"
+
+        def is_ready(self) -> bool:
+            return True
+
+        def search(
+            self,
+            *,
+            vector: NDArray[np.float32],
+            k: int,
+            filters: object = None,
+        ) -> list[tuple[str, float]]:
+            del vector, filters, k
+            return [("a", 0.9), ("c", 0.8)]
+
+    lookup = _lookup_from_backend(backend)
+    gs = _golden_set([GoldenQuery("q", "t", ("a",), ("b",))])
+    metrics, _ = evaluate_system(
+        backend=backend,
+        golden_set=gs,
+        embedding_lookup=lookup,
+        k=2,
+        exact_backend=_OverlappingBackend(),
+    )
+    assert metrics["ann_recall_vs_exact"] == pytest.approx(0.5)
 
 
 def test_evaluate_system_rejects_non_positive_k() -> None:
     backend = _backend(["a"])
     lookup = _lookup_from_backend(backend)
-    gs = _golden_set([GoldenQuery("q", "t", ("a",), ("a",))])
+    gs = _golden_set([GoldenQuery("q", "t", ("a",), ("b",))])
     with pytest.raises(EvaluationError, match="k must be positive"):
         evaluate_system(backend=backend, golden_set=gs, embedding_lookup=lookup, k=0)
 
@@ -268,8 +329,8 @@ def test_evaluate_system_per_query_outcomes_when_requested() -> None:
     lookup = _lookup_from_backend(backend)
     gs = _golden_set(
         [
-            GoldenQuery("q1", "t", ("a",), ("a",)),
-            GoldenQuery("q2", "t", ("a",), ("b",)),
+            GoldenQuery("q1", "t", ("a",), ("b",)),  # hit
+            GoldenQuery("q2", "t", ("a",), ("a",)),  # miss (relevant == seed)
         ]
     )
     _, outcomes = evaluate_system(
@@ -282,6 +343,7 @@ def test_evaluate_system_per_query_outcomes_when_requested() -> None:
     assert len(outcomes) == 2
     assert outcomes[0].query_id == "q1"
     assert outcomes[0].metrics["recall_at_1"] == 1.0
+    assert outcomes[1].query_id == "q2"
     assert outcomes[1].metrics["recall_at_1"] == 0.0
 
 
