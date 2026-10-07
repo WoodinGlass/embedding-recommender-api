@@ -199,6 +199,11 @@ ignore = [
 # browser should see one item per line.
 "scripts/sample_catalog_data.py" = ["E501"]
 
+# pipeline.py is a CLI: printing to stdout (summary) and stderr (progress) is
+# the intended behaviour, not a debugging leftover. T201 forbids print
+# everywhere else on purpose.
+"src/recsys/embeddings/pipeline.py" = ["T201"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["recsys"]
 
@@ -235,6 +240,7 @@ module = [
   "psycopg.*",
   "redis.*",
   "yaml.*",
+  "pyarrow.*",
 ]
 ignore_missing_imports = true
 
