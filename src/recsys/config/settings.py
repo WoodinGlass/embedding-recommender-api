@@ -49,7 +49,14 @@ class Settings(BaseSettings):
     # embeddings ----------------------------------------------------------
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_batch_size: int = Field(default=64, ge=1, le=1024)
-    embedding_onnx_path: str = "artifacts/onnx/all-MiniLM-L6-v2"
+    embedding_onnx_path: str = (
+        # Must match what scripts/export_onnx.py produces: the model
+        # name with "/" replaced by "__" (see model_slug in that
+        # script). Keeping these in sync is what makes
+        # `python -m recsys.embeddings.pipeline` work out of the box
+        # after `python scripts/export_onnx.py`.
+        "artifacts/onnx/sentence-transformers__all-MiniLM-L6-v2"
+    )
     device: Device = Device.CPU
 
     # retrieval -----------------------------------------------------------
