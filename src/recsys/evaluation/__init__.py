@@ -6,6 +6,13 @@ against a versioned golden set. Definitions are in
 results is in ``docs/adr/0010-evaluation-thresholds.md``.
 """
 
+from recsys.evaluation.baselines import (
+    BaselineResult,
+    PopularityProvider,
+    SyntheticPopularityProvider,
+    popularity_baseline,
+    random_baseline,
+)
 from recsys.evaluation.metrics import (
     ann_recall_vs_exact,
     mrr,
@@ -14,8 +21,13 @@ from recsys.evaluation.metrics import (
 )
 
 __all__ = [
+    "BaselineResult",
+    "PopularityProvider",
+    "SyntheticPopularityProvider",
     "ann_recall_vs_exact",
     "mrr",
     "ndcg_at_k",
+    "popularity_baseline",
+    "random_baseline",
     "recall_at_k",
 ]
