@@ -1,84 +1,149 @@
 """Unit tests for structured logging configuration.
 
-The critical property: structlog output goes to **stderr**, not stdout.
-CLI scripts print their final JSON result on stdout so a caller can
-``json.load`` it. If logs landed on stdout as well, the stream would
-contain log lines before the JSON and every consumer would fail with
+Every test in this module runs a small Python program in a **subprocess**
+and inspects that subprocess's stdout and stderr. That is deliberate: an
+in-process test using ``capsys``/``capfd`` cannot reliably observe what a
+``PrintLoggerFactory`` writes, because structlog captures ``sys.stderr``
+at the moment ``structlog.configure`` runs, and pytest's capturing
+fixtures replace that stream *after* module import. A subprocess has a
+clean start: whatever stream the logger writes to is a file descriptor
+we can inspect directly.
+
+The property under test is simple and load-bearing:
+
+    structlog output goes to stderr, never to stdout.
+
+CLI scripts (``scripts/build_index.py``, ``scripts/promote_index.py``,
+``scripts/rollback_index.py``, ``scripts/eval.py``) print their final
+result as a single JSON line on stdout so a caller can ``json.load`` it.
+If logs landed on stdout as well, every consumer would fail with
 "Extra data".
 """
 
 from __future__ import annotations
 
-import io
-import logging
-from contextlib import redirect_stderr, redirect_stdout
-from typing import Any
+import json
+import os
+import pathlib
+import subprocess
+import sys
 
 import pytest
 
-from recsys.config.enums import LogFormat
-from recsys.config.settings import Settings
-from recsys.monitoring import logging as log_mod
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+SRC = REPO_ROOT / "src"
 
 pytestmark = pytest.mark.unit
 
 
-def _settings(**overrides: Any) -> Settings:
-    # ``_env_file`` is a documented pydantic-settings runtime kwarg that
-    # the type stubs do not expose. ``Any`` for the overrides is the
-    # honest type at a **kwargs boundary that forwards to a validated
-    # constructor: mypy cannot check the field types through **kwargs,
-    # and the constructor validates them at runtime anyway.
-    return Settings(_env_file=None, **overrides)  # type: ignore[call-arg]
+def _run_python(code: str) -> subprocess.CompletedProcess[str]:
+    """Run ``code`` in a fresh interpreter with src/ on PYTHONPATH.
+
+    The subprocess starts with a clean structlog configuration, so it
+    observes whatever the imported module configures at import time,
+    without interference from pytest's stream capture.
+    """
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(SRC) + os.pathsep + env.get("PYTHONPATH", "")
+    # S603: the command is sys.executable plus a literal "-c", and the
+    # program text is written by this test module — not user input, not
+    # anything read from disk. The suppression documents that this call
+    # site was considered.
+    return subprocess.run(  # noqa: S603
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
 
 
-def test_structlog_writes_to_stderr_not_stdout() -> None:
-    settings = _settings(log_format=LogFormat.JSON)
-    stdout_buf = io.StringIO()
-    stderr_buf = io.StringIO()
-    with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
-        log_mod.configure_logging(settings)
-        log = log_mod.get_logger("test")
-        log.info("sentinel.event", key="value")
+# --------------------------------------------------------------------------- #
+# module-level default
+# --------------------------------------------------------------------------- #
+def test_module_level_default_writes_to_stderr() -> None:
+    """Importing the logging module and logging must not touch stdout.
 
-    assert "sentinel.event" in stderr_buf.getvalue(), stderr_buf.getvalue()
-    assert "sentinel.event" not in stdout_buf.getvalue(), stdout_buf.getvalue()
+    This is the property that makes CLI scripts safe: they import modules
+    that call ``get_logger`` at import time, and if the module-level
+    default wrote to stdout the CLI's JSON output would be corrupted.
+    """
+    code = (
+        "from recsys.monitoring.logging import get_logger\n"
+        "log = get_logger('test')\n"
+        "log.info('default.event', key='v')\n"
+    )
+    result = _run_python(code)
+    assert result.returncode == 0, result.stderr
+    assert "default.event" in result.stderr, f"log line not on stderr; stderr={result.stderr!r}"
+    assert "default.event" not in result.stdout, (
+        f"log line leaked to stdout; stdout={result.stdout!r}"
+    )
 
 
-def test_stdout_remains_clean_for_json_consumers() -> None:
-    """A CLI that prints one JSON line after configure_logging must produce
+def test_module_level_default_is_json() -> None:
+    code = (
+        "from recsys.monitoring.logging import get_logger\n"
+        "log = get_logger('test')\n"
+        "log.info('json.event', key='v')\n"
+    )
+    result = _run_python(code)
+    line = [ln for ln in result.stderr.splitlines() if ln.strip()][-1]
+    doc = json.loads(line)
+    assert doc["event"] == "json.event"
+    assert doc["key"] == "v"
+    assert doc["level"] == "info"
+
+
+# --------------------------------------------------------------------------- #
+# configure_logging override
+# --------------------------------------------------------------------------- #
+def test_configure_logging_routes_to_stderr() -> None:
+    code = (
+        "from recsys.config.settings import Settings\n"
+        "from recsys.monitoring import logging as lm\n"
+        "lm.configure_logging(Settings(_env_file=None))\n"
+        "log = lm.get_logger('test')\n"
+        "log.info('configured.event', key='v')\n"
+    )
+    result = _run_python(code)
+    assert result.returncode == 0, result.stderr
+    assert "configured.event" in result.stderr
+    assert "configured.event" not in result.stdout
+
+
+def test_stdout_remains_parseable_after_logging() -> None:
+    """A CLI that prints one JSON line between two log calls produces
     exactly that line on stdout."""
-    import json
-
-    settings = _settings(log_format=LogFormat.JSON)
-    stdout_buf = io.StringIO()
-    stderr_buf = io.StringIO()
-    with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
-        log_mod.configure_logging(settings)
-        log = log_mod.get_logger("cli")
-        log.info("cli.start")
-        print(json.dumps({"event": "cli.done", "value": 42}))
-        log.info("cli.end")
-
-    lines = [ln for ln in stdout_buf.getvalue().splitlines() if ln.strip()]
-    assert len(lines) == 1, stdout_buf.getvalue()
+    code = (
+        "import json\n"
+        "from recsys.monitoring.logging import get_logger\n"
+        "log = get_logger('cli')\n"
+        "log.info('cli.start')\n"
+        "print(json.dumps({'event': 'cli.done', 'value': 42}))\n"
+        "log.info('cli.end')\n"
+    )
+    result = _run_python(code)
+    assert result.returncode == 0, result.stderr
+    lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+    assert len(lines) == 1, f"expected 1 stdout line, got {len(lines)}: {result.stdout!r}"
     doc = json.loads(lines[0])
     assert doc == {"event": "cli.done", "value": 42}
 
 
-def test_logging_is_idempotent() -> None:
-    settings = _settings()
-    log_mod.configure_logging(settings)
-    log_mod.configure_logging(settings)
-    log = log_mod.get_logger("test")
-    # No exception is the assertion.
-    log.info("test.idempotent")
-
-
-@pytest.fixture(autouse=True)
-def _reset_root_logger() -> object:
-    """Keep the stdlib root logger from leaking between tests."""
-    root = logging.getLogger()
-    before = list(root.handlers)
-    yield None
-    root.handlers[:] = before
+# --------------------------------------------------------------------------- #
+# idempotency
+# --------------------------------------------------------------------------- #
+def test_configure_logging_is_idempotent() -> None:
+    code = (
+        "from recsys.config.settings import Settings\n"
+        "from recsys.monitoring import logging as lm\n"
+        "s = Settings(_env_file=None)\n"
+        "lm.configure_logging(s)\n"
+        "lm.configure_logging(s)\n"
+        "log = lm.get_logger('test')\n"
+        "log.info('idempotent.event')\n"
+    )
+    result = _run_python(code)
+    assert result.returncode == 0, result.stderr
+    assert "idempotent.event" in result.stderr
