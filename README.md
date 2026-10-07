@@ -6,7 +6,7 @@
 
 Embedding-based recommendation service with low-latency ANN retrieval (target p95 < 200 ms), re-ranking, statistically valid A/B testing, monitoring, and automated deployment (Docker + CI/CD). It ships with offline evaluation, model/index versioning, fallbacks, and a churn-risk extension.
 
-> **Status:** in development. M0 (Foundation) and M1 (Embedding pipeline) are complete; see [Milestones](#milestones). Performance figures are targets until the M4 benchmark is published.
+> **Status:** in development. M0 (Foundation), M1 (Embedding pipeline), and M2 (Retrieval and offline evaluation) are complete; see [Milestones](#milestones). Performance figures are targets until the M4 benchmark is published.
 
 ## What this is / is not
 
@@ -281,14 +281,38 @@ goes to stderr as JSON lines and can be silenced with `--quiet`. Exit codes:
 - **ANN fidelity.** Overlap with exact (brute-force) kNN, so index tuning is not mistaken for a relevance change.
 - **CI gate.** `make eval` writes a JSON report and fails if any metric drops below `evaluation/thresholds.yaml`. CI runs it on the committed golden set to stay fast; the full set runs before every index promotion. *(M2)*
 
-Results (filled in during M2; only measured numbers belong here):
+Results (measured on the sample catalog, 200 items, k=10; see
+`evaluation/report.json` in CI for the full report). Values below are from
+the `evaluation gate` job; they are reproduced by `make eval`:
 
 | System | Recall@10 | NDCG@10 | MRR | ANN recall vs exact |
 |---|---|---|---|---|
-| Popularity baseline | TBD | TBD | TBD | n/a |
-| pgvector HNSW | TBD | TBD | TBD | TBD |
-| pgvector HNSW + re-ranker | TBD | TBD | TBD | TBD |
-| FAISS HNSW | TBD | TBD | TBD | TBD |
+| Random baseline | 0.107 | 0.090 | 0.178 | n/a |
+| Popularity (synthetic) | 0.057 | 0.044 | 0.089 | n/a |
+| Exact kNN | 0.886 | 0.893 | 0.967 | 1.000 |
+| pgvector HNSW | 0.886 | 0.893 | 0.967 | 1.000 |
+| pgvector HNSW + re-ranker | TBD (M3) | TBD (M3) | TBD (M3) | — |
+| FAISS HNSW | TBD (M2.6) | TBD (M2.6) | TBD (M2.6) | TBD (M2.6) |
+
+Reading the table:
+
+- **pgvector HNSW matches exact kNN exactly** on this catalog: same top-10
+  for every query, so ANN fidelity is 1.000. This is the backend-agreement
+  property that ADR-0012 requires, confirmed on the real index.
+- **The embedding model is roughly eight times better than random** on
+  Recall@10 and much further ahead on MRR. The sample catalog's topic
+  clusters are what the model is expected to find; the numbers say it does.
+- **Synthetic popularity is worse than random here** — a property of the
+  placeholder, not of popularity as a signal. The `PopularityProvider`
+  interface (ADR-0009 § 4) is the seam M5 will swap for an event-based
+  provider whose distribution actually resembles popularity.
+- **Seeds are excluded from retrieved results** before metrics are
+  computed. Without this, the seeds occupy ranks 1..N of every query (they
+  are the nearest neighbours of their own mean) and MRR collapses to
+  `1/(n_seeds + 1)` regardless of model quality.
+
+Thresholds are in `evaluation/thresholds.yaml`; every value above is at or
+above its threshold and its absolute floor (ADR-0010).
 
 ## A/B testing
 
@@ -440,7 +464,7 @@ were considered and rejected — see the ADRs under [`docs/adr/`](docs/adr/).
 |---|---|---|---|---|
 | M0 | Foundation | Repo, CI (lint, type check, test), Docker, pre-commit, first ADR | CI is green on the scaffold; the `docker-build` job builds the image and serves `/healthz`, `/readyz`, and `/metrics` in a container | Done |
 | M1 | Embedding pipeline | Batch and incremental embedding, model/index versioning, golden set | Re-running the pipeline produces identical results | Done |
-| M2 | Retrieval and offline evaluation | pgvector HNSW, benchmark vs FAISS, Recall@k / NDCG / MRR | Metrics are documented and enforced as a CI gate | Planned |
+| M2 | Retrieval and offline evaluation | pgvector HNSW, benchmark vs FAISS, Recall@k / NDCG / MRR | Metrics are documented and enforced as a CI gate | Done |
 | M3 | Production API | Auth, rate limiting, caching, fallback, health checks | Integration tests are green | Planned |
 | M4 | Observability and load test | Prometheus/Grafana, tracing, Locust | p95 < 200 ms at the target RPS, with evidence committed in `docs/` | Planned |
 | M5 | A/B testing | Assignment, logging, statistical analysis, dashboard | Simulation reaches the correct conclusion on a known effect | Planned |

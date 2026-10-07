@@ -8,6 +8,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `src/recsys/evaluation/`: the offline evaluation harness. `metrics.py`
+  (Recall@k, NDCG@k, MRR, ANN fidelity as pure functions), `golden_set.py`
+  (loader and validator for `evaluation/golden_set/v1.jsonl`),
+  `baselines.py` (random and synthetic popularity; exact kNN is
+  `NumpyBackend`), `thresholds.py` (loader and gate), `runner.py`
+  (orchestration, query encoding, report assembly). (M2.4)
+- `scripts/eval.py`: the CLI that ties the evaluation pieces together.
+  Exit codes 0 (gate passed), 1 (gate failed), 2 (could not run), with a
+  metrics table printed to stderr so the numbers appear in the CI log.
+  (M2.5)
+- `evaluation/thresholds.yaml` and `evaluation/thresholds_history.yaml`:
+  the initial gate configuration (ADR-0010) and its audit trail. The
+  history's second entry records the first measured baseline. (M2.5)
+- `tests/unit/test_logging.py`: subprocess-based tests pinning that
+  structlog output goes to stderr, never stdout. (M2.5)
+- `evaluation` CI job: provisions pgvector, applies migrations, embeds the
+  sample catalog, builds and promotes an index, and runs `make eval`. The
+  report is uploaded as a build artifact on every run. (M2.5)
+- `Makefile` target `eval`. (M2.5)
+- `NumpyBackend.embedding_for(item_id)` for the evaluation runner's
+  seed-vector lookup. (M2.5)
+- `evaluate_gate(..., required_systems=[...])`: a system named in the
+  argument that is missing from the report fails the gate. (M2.5)
+- `docs/adr/0005-m2-scope-retrieval-only.md` through
+  `docs/adr/0012-backend-abstraction.md`: eight ADRs covering M2 scope,
+  the pgvector schema and model-swap procedure, index identity and
+  collisions, filter strategy and the pgvector version fallback, golden
+  set versioning and metrics, evaluation thresholds, FAISS benchmark
+  methodology, and backend abstraction. (M2.0)
+- `docs/retrieval-and-evaluation.md`: the M2 design doc consolidating
+  the eight ADRs. (M2.0)
+- `docs/contracts.md` § 1.4 and § 4.4: index registry schema,
+  `index_version` format, and retrieval log event names. (M2.0)
+- `docs/ops.md`: backup, restore, index lifecycle, disk-space planning,
+  and M2-specific failure modes. (M2.0)
+- `src/recsys/retrieval/`: `NumpyBackend` (exact kNN, ADR-0012),
+  `PgvectorBackend` (HNSW, ADR-0006, ADR-0008), `identity.py` (the
+  `index_version` hash, ADR-0007), `filters.py` (the FILTER_FIELDS
+  allowlist, ADR-0008), `rerank.py` (an empty `Reranker` protocol so M3
+  has a defined plug-in point, ADR-0005), `build.py`, `promote.py`, and
+  the class registry that replaced the M0 factory registry. (M2.1–M2.3)
+- `migrations/versions/0001_pgvector_schema.py` and the Alembic setup:
+  the `item`, `embedding`, and `index_registry` tables with the HNSW
+  cosine index. (M2.2)
+- `scripts/build_index.py`, `scripts/promote_index.py`,
+  `scripts/rollback_index.py`: the index lifecycle CLIs, with a
+  `pg_advisory_lock` around promote and rollback. (M2.3)
+- `tests/integration/test_index_lifecycle.py` and
+  `tests/integration/test_backend_agreement.py`: end-to-end lifecycle
+  tests and the backend-agreement regression test from ADR-0012. (M2.3)
 - `tests/integration/test_determinism_tiers.py`: the three-tier determinism
   contract is now tested explicitly. Strict (byte-identical Parquet) is
   gated on `RECSYS_STRICT_DETERMINISM=1` and runs in CI; semantic (top-k
@@ -94,10 +144,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CHANGELOG.md` (this file). (M0.3)
 
 ### Changed
-- n/a
+- `src/recsys/monitoring/logging.py`: structlog now writes to **stderr**,
+  and the module-level default (applied at import time) matches what
+  `configure_logging` does. This makes CLI scripts safe: their stdout
+  carries the final JSON result and nothing else. (M2.5)
+- `src/recsys/config/settings.py`: default `EMBEDDING_ONNX_PATH` aligned
+  with what `scripts/export_onnx.py` actually writes. (M2.5)
+- `README.md`: evaluation table filled with the first measured values from
+  the CI `evaluation gate` job; M2 milestone moved to Done. (M2.5)
+- `README.md`: relaxed `requires-python` from `>=3.11,<3.12` to `>=3.11`
 
 ### Fixed
-- n/a
+- `src/recsys/evaluation/runner.py`: the evaluation runner now excludes
+  seed items from retrieved results before computing metrics. Without
+  this, seeds occupied ranks 1..N of every result list (they are the
+  nearest neighbours of their own mean) and MRR collapsed to
+  `1/(n_seeds + 1)` regardless of model quality. (M2.4)
+- `src/recsys/monitoring/logging.py`: structlog output moved from stdout
+  to stderr, and the module-level default is now safe for CLI scripts
+  that never call `configure_logging`. Before the fix,
+  `scripts/build_index.py` polluted its stdout with log lines and broke
+  any consumer that parsed it as JSON. (M2.5)
+- `scripts/eval.py`: `_env_commit` no longer returns an empty string when
+  `GITHUB_SHA` is present but empty, which silently disabled the gate's
+  commit check. (M2.5)
 
 ### Security
 - n/a

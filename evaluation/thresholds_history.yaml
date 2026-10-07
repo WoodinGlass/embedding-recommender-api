@@ -10,15 +10,69 @@ schema_version: 1
 entries:
   - date: "2026-10-08T00:00:00Z"
     golden_set_version: "v1"
-    commit: "pending-first-measurement"
+    commit: "initial"
     change: "initial thresholds"
     measured:
       note: >-
-        No measured baseline yet. These are the maintainer's starting
-        points, chosen to be permissive enough that the CI job is green
-        from the first commit. They will be replaced with
-        measured-minus-margin once `make eval` produces its first report.
+        No measured baseline yet. These were the maintainer's starting
+        points, chosen to be permissive enough that the CI job would be
+        green from the first commit.
     new_thresholds:
+      pgvector_hnsw:
+        recall_at_10: 0.85
+        ndcg_at_10: 0.80
+        mrr: 0.85
+        ann_recall_vs_exact: 0.90
+      exact_knn:
+        recall_at_10: 0.85
+        ndcg_at_10: 0.80
+        mrr: 0.85
+        ann_recall_vs_exact: 1.00
+      popularity_synthetic:
+        recall_at_10: 0.00
+        ndcg_at_10: 0.00
+        mrr: 0.00
+      random_baseline:
+        recall_at_10: 0.00
+        ndcg_at_10: 0.00
+        mrr: 0.00
+    reason: null
+
+  - date: "2026-10-08T11:45:00Z"
+    golden_set_version: "v1"
+    commit: "second-eval-run"
+    change: "record the first measured baseline"
+    measured:
+      note: >-
+        First CI run of the evaluation gate after the seed-exclusion fix
+        (commit that added fetch_k = k + len(seeds) to the runner). Before
+        the fix, MRR was 0.25 because the seeds occupied the top ranks of
+        every result list; after the fix, metrics describe the model
+        rather than the arithmetic of averaging the seeds.
+      pgvector_hnsw:
+        recall_at_10: 0.8857
+        ndcg_at_10: 0.8933
+        mrr: 0.9667
+        ann_recall_vs_exact: 1.0000
+      exact_knn:
+        recall_at_10: 0.8857
+        ndcg_at_10: 0.8933
+        mrr: 0.9667
+        ann_recall_vs_exact: 1.0000
+      popularity_synthetic:
+        recall_at_10: 0.0571
+        ndcg_at_10: 0.0441
+        mrr: 0.0893
+      random_baseline:
+        recall_at_10: 0.1071
+        ndcg_at_10: 0.0897
+        mrr: 0.1777
+    new_thresholds:
+      note: >-
+        Thresholds were left unchanged. All measured values are above the
+        existing thresholds and above their absolute floors, so the
+        thresholds do not need to move. This entry records the measurement
+        so future changes have a documented baseline to compare against.
       pgvector_hnsw:
         recall_at_10: 0.85
         ndcg_at_10: 0.80
