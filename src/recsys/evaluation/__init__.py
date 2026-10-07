@@ -19,15 +19,31 @@ from recsys.evaluation.metrics import (
     ndcg_at_k,
     recall_at_k,
 )
+from recsys.evaluation.runner import (
+    REPORT_SCHEMA_VERSION,
+    EvaluationError,
+    QueryOutcome,
+    build_report,
+    encode_query,
+    evaluate_system,
+    write_report,
+)
 
 __all__ = [
+    "REPORT_SCHEMA_VERSION",
     "BaselineResult",
+    "EvaluationError",
     "PopularityProvider",
+    "QueryOutcome",
     "SyntheticPopularityProvider",
     "ann_recall_vs_exact",
+    "build_report",
+    "encode_query",
+    "evaluate_system",
     "mrr",
     "ndcg_at_k",
     "popularity_baseline",
     "random_baseline",
     "recall_at_k",
+    "write_report",
 ]
