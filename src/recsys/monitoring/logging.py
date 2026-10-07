@@ -47,7 +47,13 @@ def configure_logging(settings: Settings) -> None:
     structlog.configure(
         processors=[*shared_processors, renderer],
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
-        logger_factory=structlog.PrintLoggerFactory(),
+        # Logs go to stderr, not stdout. CLI scripts (scripts/build_index.py,
+        # scripts/eval.py) print their final JSON result on stdout so a
+        # caller can `json.load` it; if logs landed on stdout as well, the
+        # stream would contain log lines before the JSON and every consumer
+        # would fail with "Extra data". The rule is: stdout is program
+        # output, stderr is diagnostics. See docs/embedding-pipeline.md § 6.
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
         cache_logger_on_first_use=True,
     )
 
