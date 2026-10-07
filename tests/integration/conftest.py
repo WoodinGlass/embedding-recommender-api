@@ -71,12 +71,21 @@ def clean_db(pg_connection: Any) -> Iterator[None]:
     import psycopg
 
     assert isinstance(pg_connection, psycopg.Connection)
+
+    # If the previous test failed inside a transaction, the connection is
+    # in INERROR and any statement — including TRUNCATE — is refused with
+    # InFailedSqlTransaction. Rolling back first restores a usable
+    # connection so one failing test does not cascade to the rest of the
+    # session.
+    pg_connection.rollback()
+
     with pg_connection.cursor() as cur:
         cur.execute("TRUNCATE TABLE embedding, item, index_registry RESTART IDENTITY CASCADE")
     pg_connection.commit()
     try:
         yield
     finally:
+        pg_connection.rollback()
         with pg_connection.cursor() as cur:
             cur.execute("TRUNCATE TABLE embedding, item, index_registry RESTART IDENTITY CASCADE")
         pg_connection.commit()

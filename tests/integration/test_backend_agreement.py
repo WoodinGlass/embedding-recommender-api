@@ -32,6 +32,10 @@ from recsys.retrieval.promote import promote
 
 pytestmark = pytest.mark.integration
 
+# Must match the fixed dimension of the embedding.vector column
+# (ADR-0006): vector(384) for the pinned all-MiniLM-L6-v2 model.
+EMBEDDING_DIM: int = 384
+
 TOLERANCE = 1e-5
 
 
@@ -50,7 +54,7 @@ def _write_run(
 
     run_dir = root / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    dim = 8
+    dim = EMBEDDING_DIM
     rng = np.random.default_rng(seed)
     raw: NDArray[np.float32] = rng.standard_normal((len(item_ids), dim)).astype(np.float32)
     norms = np.linalg.norm(raw, axis=1, keepdims=True)
@@ -170,7 +174,7 @@ def test_backends_agree_on_exact_search(
     # Query with a vector not in the catalog (a fresh point), so the answer
     # is not trivially "the same row".
     rng = np.random.default_rng(1234)
-    q = rng.standard_normal(8).astype(np.float32)
+    q = rng.standard_normal(EMBEDDING_DIM).astype(np.float32)
     q = (q / np.linalg.norm(q)).astype(np.float32)
 
     numpy_results = numpy_backend.search(vector=q, k=10)
@@ -222,7 +226,7 @@ def test_backends_agree_with_filter(
     pg_backend = PgvectorBackend.from_registry(pg_connection, hnsw_ef_search=len(item_ids) + 1)
 
     rng = np.random.default_rng(99)
-    q = rng.standard_normal(8).astype(np.float32)
+    q = rng.standard_normal(EMBEDDING_DIM).astype(np.float32)
     q = (q / np.linalg.norm(q)).astype(np.float32)
 
     filters = {"category": "books"}

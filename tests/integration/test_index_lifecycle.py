@@ -33,6 +33,10 @@ pytestmark = pytest.mark.integration
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
+# Must match the fixed dimension of the embedding.vector column
+# (ADR-0006): vector(384) for the pinned all-MiniLM-L6-v2 model.
+EMBEDDING_DIM: int = 384
+
 
 # --------------------------------------------------------------------------- #
 # helpers
@@ -51,7 +55,9 @@ def _write_parquet_run(
     run_dir = root / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    dim = 4
+    # Must match the fixed dimension of the embedding.vector column
+    # (ADR-0006): vector(384) for the pinned all-MiniLM-L6-v2 model.
+    dim = EMBEDDING_DIM
     rng = np.random.default_rng(hash(run_id) % (2**32))
     raw = rng.standard_normal((len(item_ids), dim)).astype(np.float32)
     norms = np.linalg.norm(raw, axis=1, keepdims=True)
