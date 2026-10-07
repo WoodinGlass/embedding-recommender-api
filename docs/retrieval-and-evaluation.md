@@ -47,7 +47,7 @@ wins, and the disagreement is a bug to be fixed in the same change.
 src/recsys/retrieval/
 ├── __init__.py
 ├── base.py              # IndexBackend protocol (ADR-0012)
-├── registry.py          # INDEX_BACKEND enum → factory (ADR-0012)
+├── registry.py          # INDEX_BACKEND enum → backend class (ADR-0012)
 ├── filters.py           # FILTER_FIELDS allowlist (ADR-0008)
 ├── identity.py          # index_version hash (ADR-0007)
 ├── pgvector.py          # PgvectorBackend (ADR-0006, ADR-0008, ADR-0012)
@@ -115,6 +115,17 @@ Both implementations agree on top-k results for exact search, verified by
 a conditional integration test (runs in CI, skips in Colab). The
 tie-breaking rule (item_id ascending on equal scores) is applied by the
 caller, in `runner.py` and — from M3 — in the recommend endpoint.
+
+**Registry.** `registry.py` maps an `IndexBackendEnum` value to a backend
+*class*, not a zero-argument factory. A factory registry cannot express a
+backend whose constructor needs arguments: `PgvectorBackend` needs a
+connection, `NumpyBackend` needs a run directory. The registry exists as
+a test-injection seam and as a future plugin point; production callers
+instantiate classes directly via `PgvectorBackend.from_registry(...)` or
+`NumpyBackend.from_run_directory(...)`. FAISS is registered as a sentinel
+whose constructor raises — running it through the registry is a mistake
+and the error says so. `NumpyBackend` is not registered at all
+(ADR-0012).
 
 ---
 
