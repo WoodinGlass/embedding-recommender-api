@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tests/integration/test_determinism_tiers.py`: the three-tier determinism
+  contract is now tested explicitly. Strict (byte-identical Parquet) is
+  gated on `RECSYS_STRICT_DETERMINISM=1` and runs in CI; semantic (top-k
+  neighbours identical) and tolerance (per-row cosine ≥ 0.9999) run
+  everywhere. The CI `test-encoder` job sets the strict env var. (M1.4)
+- `docs/embedding-pipeline.md` § 5.1: the tier table now names the test
+  that enforces each tier, so the contract and its verification are one
+  document. (M1.4)
 - `docs/adr/0004-versioned-runs-with-current-pointer.md`: embedding artifacts
   are written into versioned run directories under
   `artifacts/embeddings/runs/<run_id>/`, and the active run is named by a

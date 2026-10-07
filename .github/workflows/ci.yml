@@ -167,6 +167,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev-lite,inference,export]"
       - name: Run encoder parity tests
+        env:
+          # Enable the strict (byte-identical) determinism tier. ONNX
+          # Runtime + BLAS bit-level output is only guaranteed stable with
+          # pinned thread counts; the ONNX encoder is configured with
+          # intra_op=inter_op=1, and this env var tells the test suite to
+          # assert the strict contract. Locally, without this variable, the
+          # strict tier is skipped and only semantic + tolerance run.
+          RECSYS_STRICT_DETERMINISM: "1"
         run: make test-encoder
 
   # ---------------------------------------------------------------------------

@@ -154,11 +154,16 @@ That phrase is under-specified. This section makes it specific.
 
 ### 5.1 Three tiers
 
-| Tier | Assertion | Where |
-|---|---|---|
-| **Strict** | SHA256 of `*.parquet` matches between two consecutive runs in the same environment | **CI only** |
-| **Semantic** | For a fixed probe set of items, the top-k (k=10) nearest neighbours by cosine distance are identical between two runs — same item IDs, same order, ties broken by `item_id` ascending | **CI and local** |
-| **Tolerance** | Per-row cosine similarity ≥ 0.9999 between two runs | **Local only** |
+| Tier | Assertion | Where | Enforced by |
+|---|---|---|---|
+| **Strict** | SHA256 of `*.parquet` matches between two consecutive runs in the same environment | **CI only** | `tests/integration/test_determinism_tiers.py::test_strict_tier_two_batch_runs_produce_identical_bytes` (gated on `RECSYS_STRICT_DETERMINISM=1`) |
+| **Semantic** | For a fixed probe set of items, the top-k (k=10) nearest neighbours by cosine distance are identical between two runs — same item IDs, same order, ties broken by `item_id` ascending | **CI and local** | `tests/integration/test_determinism_tiers.py::test_semantic_tier_topk_identical` |
+| **Tolerance** | Per-row cosine similarity ≥ 0.9999 between two runs | **CI and local** | `tests/integration/test_determinism_tiers.py::test_tolerance_tier_per_row_cosine` |
+
+The strict tier is enabled by setting the environment variable
+`RECSYS_STRICT_DETERMINISM=1`. CI does this on the `test-encoder` job
+(see `.github/workflows/ci.yml`). Locally, the strict test skips with an
+explanatory reason; the semantic and tolerance tiers always run.
 
 ### 5.2 Why byte-identical is CI-only
 
