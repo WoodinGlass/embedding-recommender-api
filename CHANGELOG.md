@@ -154,6 +154,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the CI `evaluation gate` job; M2 milestone moved to Done. (M2.5)
 - `README.md`: relaxed `requires-python` from `>=3.11,<3.12` to `>=3.11`
 
+### Added
+- `scripts/bench_faiss.py` and `scripts/render_benchmark.py`: the FAISS
+  HNSW benchmark from ADR-0011. Compares exact kNN (numpy) and FAISS HNSW
+  over the same vectors, golden set, and query vectors; writes a JSON
+  with the environment metadata needed to reproduce the numbers; the
+  Markdown is generated from the JSON, never hand-edited. Seed exclusion
+  is applied so the benchmark's metrics are comparable to the evaluation
+  report's. (M2.6)
+- `docs/faiss-benchmark.json` and `docs/faiss-benchmark.md`: the first
+  measured benchmark run, on the sample catalog (200 items, dim 384).
+  Headline: on 200 items, HNSW is fully connected at every ef_search in
+  the grid; ANN fidelity is 1.0000 across the board. On a larger catalog
+  the recall/latency trade-off would be visible. (M2.6)
+
 ### Fixed
 - `src/recsys/evaluation/runner.py`: the evaluation runner now excludes
   seed items from retrieved results before computing metrics. Without

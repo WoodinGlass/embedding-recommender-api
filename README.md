@@ -351,13 +351,40 @@ python -m recsys.embeddings.pipeline --mode=batch
 make load-test                 # planned
 ```
 
-Results (filled in during M4):
+**Serving benchmarks are M4.** The table below is the in-process
+library comparison from ADR-0011, on the sample catalog (200 items ×
+384 dims) with `hnsw_m=16`, `hnsw_ef_construction=64`, single-threaded
+FAISS, and a 50-query warmup over 500 measured queries. It answers "which
+ANN library is faster on the same vectors", not "what is the served
+latency". The served latency is measured in M4 against a running service.
 
-| Configuration | Items | RPS | p50 | p95 | p99 | ANN recall@10 vs exact |
+| Configuration | ef_search | p50 (ms) | p95 (ms) | p99 (ms) | QPS | ANN recall@10 vs exact |
 |---|---|---|---|---|---|---|
-| pgvector HNSW | 100k | TBD | TBD | TBD | TBD | TBD |
-| pgvector HNSW + Redis cache | 100k | TBD | TBD | TBD | TBD | TBD |
-| FAISS HNSW (benchmark) | 100k | TBD | TBD | TBD | TBD | TBD |
+| Exact kNN (numpy) | — | 0.0387 | 0.0584 | 2.0731 | 11 663 | 1.0000 |
+| FAISS HNSW | 40 | 0.0547 | 0.1483 | 0.1964 | 14 819 | 1.0000 |
+| FAISS HNSW | 80 | 0.0709 | 0.0871 | 0.1019 | 13 500 | 1.0000 |
+| FAISS HNSW | 160 | 0.1015 | 1.3719 | 2.1651 | 4 670 | 1.0000 |
+| FAISS HNSW | 320 | 0.1181 | 2.1470 | 2.1840 | 3 947 | 1.0000 |
+
+Environment: Intel Xeon @ 2.20 GHz, 2 logical cores, 12.7 GiB RAM,
+Linux 6.6, Python 3.13.16, NumPy 2.1.3, FAISS 1.15.1. Full report in
+[`docs/faiss-benchmark.md`](docs/faiss-benchmark.md); raw measurement in
+[`docs/faiss-benchmark.json`](docs/faiss-benchmark.json).
+
+On a catalog of 200 items, HNSW is fully connected at every ef_search in
+the grid, so the ANN-fidelity column is 1.0000 across the board: HNSW
+matches exact search. On a larger catalog the column would show a
+recall/latency trade-off. The latency jump at `ef_search >= 160` reflects
+that the value exceeds the catalog size (200), so the graph walk does
+more work than the data justifies; `ef_search <= catalog_size` is the
+range that matters in practice.
+
+**pgvector's served latency is not in this table.** ADR-0011 explains
+why: pgvector's latency is measured server-side through the connection
+the API uses, not in-process. It is the measurement M4 publishes against
+the p95 < 200 ms target. The FAISS table above is the library-to-library
+comparison that motivates the ADR-0001 decision to use pgvector by
+default.
 
 ## Churn-risk extension
 
