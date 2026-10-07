@@ -2,7 +2,7 @@
 
 Each topic defines a slug, a category, five brands, and ten items. The
 generator (``generate_sample_catalog.py``) turns this into
-``data/sample/catalog.jsonl`` and ``evaluation/golden_set/queries.yaml``.
+``data/sample/catalog.jsonl`` and ``evaluation/golden_set/v1.jsonl``.
 
 This file is data, not logic. Every entry is intentionally short so a
 reviewer can read the whole catalog in a browser. Re-running the generator

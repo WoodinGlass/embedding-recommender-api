@@ -276,7 +276,7 @@ goes to stderr as JSON lines and can be silenced with `--quiet`. Exit codes:
 
 ## Offline evaluation
 
-- **Golden set.** Query-to-relevant-items pairs in `evaluation/golden_set/queries.yaml`, committed. Larger sets are versioned with DVC. The committed set has 20 queries, one per topic, each with three seed items and seven relevant items drawn from the same topic cluster.
+- **Golden set.** Query-to-relevant-items pairs in `evaluation/golden_set/v1.jsonl`, committed. The version is the filename (ADR-0009); the file is JSONL, one query per line. Larger sets are versioned with DVC. The committed set has 20 queries, one per topic, each with three seed items and seven relevant items drawn from the same topic cluster.
 - **Retrieval quality.** Recall@k, NDCG@k, and MRR against the golden labels.
 - **ANN fidelity.** Overlap with exact (brute-force) kNN, so index tuning is not mistaken for a relevance change.
 - **CI gate.** `make eval` writes a JSON report and fails if any metric drops below `evaluation/thresholds.yaml`. CI runs it on the committed golden set to stay fast; the full set runs before every index promotion. *(M2)*

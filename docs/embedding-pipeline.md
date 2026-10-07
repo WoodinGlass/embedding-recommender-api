@@ -425,7 +425,7 @@ created.
 - Deterministic generation: the file is authored, not generated at test time.
   Reviewers can read it in a browser; diffs are meaningful.
 
-**Golden set** — `evaluation/golden_set/queries.yaml`, committed.
+**Golden set** — `evaluation/golden_set/v1.jsonl`, committed. Format and versioning are fixed by ADR-0009.
 
 - 20 queries, one per topic.
 - Each query has 3–5 seed items from its topic.
