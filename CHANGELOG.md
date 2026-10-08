@@ -8,6 +8,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Re-ranker (M3.4, ADR-0016): `src/recsys/retrieval/rerank.py` with
+  the `Candidate`, `RerankConfig`, and `Reranker` protocol; the
+  `WeightedBlendReranker` implementation (min-max `sim`, rank-based
+  `pop`, exponential `rec` decay, single-step MMR gated by an
+  explicit `enable_mmr` flag); `src/recsys/retrieval/providers.py`
+  with a `SyntheticPopularityProvider` (a deterministic hash of the
+  item id, the ADR's placeholder until M5) and a `PgRecencyProvider`
+  (batch query, `SET LOCAL statement_timeout` inside an explicit
+  transaction). Every sort is `(score DESC, item_id ASC)`, the total
+  order the ADR requires for reproducible evaluation and A/B.
+- `search_with_vectors` on `PgvectorBackend` and `NumpyBackend`, an
+  optional extension to the `IndexBackend` protocol that returns
+  `(item_id, score, vector)` triples so the re-ranker's MMR step
+  does not pay a second round trip. The `_coerce_vector` helper
+  accepts the four shapes a driver may return (ndarray, bytes, str,
+  list); the driver the project uses returns text unless the
+  `pgvector.psycopg` adapter is registered, which it is not on the
+  shared connection.
+- `evaluate_rerank_arm` in the evaluation runner. It returns a
+  `RerankArmResult` with a `status` of `ok`, `degraded`, or `error`;
+  reports `ann_recall_vs_exact` as null (post-rerank fidelity is
+  not meaningful) alongside `ann_recall_vs_exact_pre_rerank` (the
+  retrieval stage stays measurable); and records
+  `provider_missing_rate_popularity` and `_recency` so a reader can
+  tell a low score from a missing signal.
+- `scripts/eval.py` runs three rerank arms
+  (`exact_knn_blend`, `pgvector_hnsw_blend`,
+  `pgvector_hnsw_blend_mmr`) and accepts `--arms` and `--hot-config`.
+  `build_report` gained a `system_status` map written next to the
+  metrics; the gate ignores it, a reader does not.
+- `thresholds.yaml` split: a new `informational` list for systems
+  that are logged and reviewed but not gated. A system in the list
+  does not need a gate entry; the loader rejects overlap. The gate
+  skips informational systems in the metric loop but still applies
+  `required_systems` to them, so the label cannot hide a system that
+  stopped running.
+- Prometheus metrics `recsys_rerank_duration_seconds`,
+  `recsys_rerank_failures_total`, `recsys_rerank_skipped_total`,
+  `recsys_rerank_signal_missing_total`, and
+  `recsys_rerank_mmr_active_total`.
+- `Settings`: `cache_socket_timeout_seconds` unchanged; rerank
+  weights and MMR settings come from `config/hot.yaml`
+  (`RerankSection.to_rerank_config`), not from environment variables.
+- Integration-level fixes caught by CI on the M3.4.9 evaluation job:
+  `PgRecencyProvider` opens its own transaction (without one, a
+  failed query leaves the shared connection in the aborted state
+  and the next caller sees `InFailedSqlTransaction`), and
+  `search_with_vectors` coerces pgvector's text column form. Both
+  bugs are invisible in Colab (no PostgreSQL) and were fixed with
+  regression tests.
+- ADR-0016 amended before the implementation: `pop` is rank-based
+  (not `log1p` + min-max), `pop_norm` is higher-is-better with no
+  inversion in the blend, `Candidate.similarity` is cosine in
+  `[-1, 1]` with distance-to-similarity conversion in the caller,
+  `age_days` is measured from `created_at`, and three sections were
+  added: Determinism, Config validation, and a cardinality budget
+  for the five re-ranker metrics.
+
 - Rate limiting (M3.2, ADR-0014): a token bucket in Redis via Lua,
   two tiers (IP + credential) with a per-instance fallback when Redis
   is unreachable, trusted-proxy parsing of `X-Forwarded-For`, a
@@ -298,3 +356,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Milestone tracking lives in [`README.md`](README.md#milestones). Only measured
 numbers belong in the README; this changelog records what changed and when.
+
+**A note on the M3.4 rerank arms and the placeholder provider.**
+The first end-to-end run of the arms with the synthetic popularity
+provider (`exact_knn` NDCG@10 = 0.893 vs `exact_knn_blend` = 0.834)
+shows the blend **below** retrieval, which ADR-0016 says must not
+happen. The cause is the provider, not the composition: a SHA-256 hash
+of the item id carries no ordering signal, and with `w_pop = 0.2` the
+blend displaces 20% of the score with noise. This is the ADR's own
+warning about the placeholder made concrete. Both pgvector arms stay
+in the `informational` list in `evaluation/thresholds.yaml` until M5
+lands an event-based provider whose distribution resembles real
+popularity; only then does a threshold become a meaningful gate. Do
+not read the M3.4 arms as a quality measurement.
