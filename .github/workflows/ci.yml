@@ -279,12 +279,48 @@ jobs:
       - name: Smoke test /healthz, /readyz, /metrics
         run: |
           set -euo pipefail
-          docker run --rm -d --name recsys-ci \
+
+          # The container runs with APP_ENV=prod, which activates the prod
+          # guard in Settings (docs/adr/0013, docs/contracts.md section 3.1):
+          # API_KEYS must be an Argon2id hash (plaintext is dev-only),
+          # JWT_SECRET must be >= 32 chars and not the sentinel,
+          # USER_ID_HASH_SALT must be set and its version >= 1.
+          # The hash below is a real Argon2id hash for the literal key
+          # "ci-smoke-key"; it is a CI fixture, not a production secret.
+          docker run -d --name recsys-ci \
             -e APP_ENV=prod \
-            -e API_KEYS=ci-smoke-key \
-            -e JWT_SECRET=ci-smoke-secret-not-the-default \
+            -e API_KEYS='$argon2id$v=19$m=65536,t=3,p=4$f48R4vy/N6bUuleK8T6HMA$IoErucGQGhmYbEoTEvEzLm5uI+97gyTMvPAVpN39f9E' \
+            -e JWT_SECRET=ci-smoke-secret-not-the-default-and-long-enough \
+            -e USER_ID_HASH_SALT=ci-smoke-salt-not-the-default-value \
+            -e USER_ID_HASH_SALT_VERSION=1 \
             -p 8000:8000 recsys:ci
-          trap 'docker logs recsys-ci || true; docker rm -f recsys-ci || true' EXIT
+
+          # No --rm: the container must survive its own crash long enough for
+          # the trap to read its logs. The trap removes it either way.
+          trap 'echo "--- container logs ---"; docker logs recsys-ci || true; docker rm -f recsys-ci || true' EXIT
+
+          echo "--- waiting for /healthz ---"
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/healthz; then
+              echo
+              echo "healthz responded after ${i}s"
+              break
+            fi
+            if [ "$i" = "30" ]; then
+              echo "healthz did not respond within 30s" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "--- /readyz ---"
+          curl -fsS http://127.0.0.1:8000/readyz
+          echo
+
+          echo "--- /metrics ---"
+          curl -fsS http://127.0.0.1:8000/metrics | grep -q "recsys_active_index_info"
+          echo "metrics contains recsys_active_index_info"
+          echo "all smoke checks passed"
 
           echo "--- waiting for /healthz ---"
           for i in $(seq 1 30); do

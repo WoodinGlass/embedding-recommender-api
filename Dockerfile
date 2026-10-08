@@ -4,9 +4,10 @@
 #   builder — installs the package into an isolated virtualenv
 #   runtime — copies only the virtualenv, runs as a non-root user
 #
-# Only the extras actually needed at runtime are installed. Embeddings
-# (ONNX, sentence-transformers) will be added when the retrieval path lands
-# in M2/M3.
+# Only the extras actually needed at runtime are installed: the API
+# layer, auth, config, and observability. The embeddings and pipeline
+# extras (torch, pyarrow, onnxruntime) are not installed; they belong to
+# the batch pipeline, which runs outside the serving image.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -30,8 +31,12 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY pyproject.toml README.md LICENSE ./
 COPY src/ ./src/
 
+# Extras: api (FastAPI), auth (API key + JWT), config (experiments.yaml
+# and hot config), observability (structlog, Prometheus, OTEL). No
+# torch, no pyarrow, no onnxruntime: those belong to the pipeline and
+# the encoder parity tests, neither of which runs in the serving image.
 RUN python -m pip install --upgrade pip && \
-    pip install ".[api,observability]"
+    pip install ".[api,auth,config,observability]"
 
 # -----------------------------------------------------------------------------
 # Stage 2: runtime
