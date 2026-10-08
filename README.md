@@ -291,8 +291,8 @@ the `evaluation gate` job; they are reproduced by `make eval`:
 | Popularity (synthetic) | 0.057 | 0.044 | 0.089 | n/a |
 | Exact kNN | 0.886 | 0.893 | 0.967 | 1.000 |
 | pgvector HNSW | 0.886 | 0.893 | 0.967 | 1.000 |
+| FAISS HNSW (benchmark) | 0.886 | 0.893 | 0.967 | 1.000 |
 | pgvector HNSW + re-ranker | TBD (M3) | TBD (M3) | TBD (M3) | — |
-| FAISS HNSW | TBD (M2.6) | TBD (M2.6) | TBD (M2.6) | TBD (M2.6) |
 
 Reading the table:
 
@@ -313,6 +313,15 @@ Reading the table:
 
 Thresholds are in `evaluation/thresholds.yaml`; every value above is at or
 above its threshold and its absolute floor (ADR-0010).
+
+**FAISS is a benchmark, not a serving path.** The FAISS row is measured
+in-process (`docs/faiss-benchmark.json`, ADR-0011); on the sample catalog
+HNSW is fully connected at every `ef_search` in the grid, so it matches
+exact search exactly and lands at the same numbers as the exact kNN row.
+On a larger catalog the recall/latency trade-off would be visible. The
+latency comparison between exact kNN and FAISS is in the Performance
+section; the retrieval-quality numbers here are the same because fidelity
+is 1.0000 on this catalog.
 
 ## A/B testing
 

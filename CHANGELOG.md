@@ -144,6 +144,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CHANGELOG.md` (this file). (M0.3)
 
 ### Changed
+- `README.md`: FAISS HNSW row in the evaluation table filled with the
+  measured values from `docs/faiss-benchmark.json`. M2 is complete. (M2.7)
 - `src/recsys/monitoring/logging.py`: structlog now writes to **stderr**,
   and the module-level default (applied at import time) matches what
   `configure_logging` does. This makes CLI scripts safe: their stdout
