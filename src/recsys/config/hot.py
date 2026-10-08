@@ -79,6 +79,38 @@ class RerankSection:
     mmr_min_k: int
     candidate_multiplier: int
     recency_half_life_days: int
+    enable_mmr: bool
+
+    def to_rerank_config(self) -> Any:
+        """Return a :class:`recsys.retrieval.rerank.RerankConfig`.
+
+        The import is lazy, not at module level: ``rerank.py`` imports
+        numpy, and ``hot.py`` is loaded at app startup on an image that
+        does not install the ``[inference]`` extra. A module-level
+        import here would break that image at import time. The method is
+        only called from a caller that already needs the re-ranker (and
+        therefore numpy), so the lazy import costs nothing there.
+
+        The return type is annotated ``Any`` for the same reason: naming
+        ``RerankConfig`` in a signature would force the import at module
+        load. The runtime value is a ``RerankConfig``; the field set
+        matches and ``RerankConfig.__post_init__`` re-validates, so a
+        drift between the two dataclasses is caught at the first call,
+        not silently.
+        """
+        from recsys.retrieval.rerank import RerankConfig
+
+        return RerankConfig(
+            w_sim=self.w_sim,
+            w_pop=self.w_pop,
+            w_rec=self.w_rec,
+            mmr_lambda=self.mmr_lambda,
+            mmr_window=self.mmr_window,
+            mmr_min_k=self.mmr_min_k,
+            candidate_multiplier=self.candidate_multiplier,
+            recency_half_life_days=self.recency_half_life_days,
+            enable_mmr=self.enable_mmr,
+        )
 
 
 @dataclass(frozen=True)
@@ -115,6 +147,7 @@ _DEFAULT = HotConfig(
         mmr_min_k=10,
         candidate_multiplier=4,
         recency_half_life_days=90,
+        enable_mmr=False,
     ),
     cache=CacheSection(
         recommend_ttl_seconds=300,
@@ -189,6 +222,23 @@ def _float_field(node: dict[str, Any], name: str, *, minimum: float = 0.0) -> fl
     return fvalue
 
 
+def _bool_field(node: dict[str, Any], name: str) -> bool:
+    """Return a required boolean field.
+
+    ``bool`` is checked before ``int`` because ``True`` is an ``int`` in
+    Python; without the explicit check a YAML ``1`` would silently pass
+    as ``True`` for a flag field.
+    """
+    if name not in node:
+        raise HotConfigError(f"hot config field {name!r} is required")
+    value = node[name]
+    if not isinstance(value, bool):
+        raise HotConfigError(
+            f"hot config field {name!r} must be a bool, got {type(value).__name__}"
+        )
+    return value
+
+
 def load_hot_config(path: Path) -> HotConfig:
     """Read, validate, and return the hot config. Raises HotConfigError.
 
@@ -236,6 +286,7 @@ def load_hot_config(path: Path) -> HotConfig:
             mmr_min_k=_int_field(rr, "mmr_min_k", minimum=1),
             candidate_multiplier=_int_field(rr, "candidate_multiplier", minimum=1),
             recency_half_life_days=_int_field(rr, "recency_half_life_days", minimum=1),
+            enable_mmr=_bool_field(rr, "enable_mmr"),
         ),
         cache=CacheSection(
             recommend_ttl_seconds=_int_field(ch, "recommend_ttl_seconds", minimum=0),

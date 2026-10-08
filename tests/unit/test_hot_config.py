@@ -34,6 +34,7 @@ VALID: dict[str, Any] = {
         "mmr_min_k": 10,
         "candidate_multiplier": 4,
         "recency_half_life_days": 90,
+        "enable_mmr": False,
     },
     "cache": {
         "recommend_ttl_seconds": 300,
@@ -196,3 +197,38 @@ def test_store_reload_ignores_second_failure_same_mtime(tmp_path: Path) -> None:
     _bump_mtime(p)
     assert store.reload_if_changed() is False
     assert store.reload_if_changed() is False
+
+
+# ---------------------------------------------------------------- #
+# enable_mmr + to_rerank_config (M3.4.6)
+# ---------------------------------------------------------------- #
+def test_enable_mmr_default_false(tmp_path: Path) -> None:
+    cfg = load_hot_config(_write(tmp_path, VALID))
+    assert cfg.rerank.enable_mmr is False
+
+
+def test_enable_mmr_true_loads(tmp_path: Path) -> None:
+    data = _variant_nested("rerank", enable_mmr=True)
+    cfg = load_hot_config(_write(tmp_path, data))
+    assert cfg.rerank.enable_mmr is True
+
+
+def test_enable_mmr_must_be_bool(tmp_path: Path) -> None:
+    data = _variant_nested("rerank", enable_mmr=1)
+    with pytest.raises(HotConfigError, match="enable_mmr"):
+        load_hot_config(_write(tmp_path, data))
+
+
+def test_to_rerank_config_round_trips(tmp_path: Path) -> None:
+    """The section converts to a RerankConfig with the same field values."""
+    cfg = load_hot_config(_write(tmp_path, VALID))
+    rc = cfg.rerank.to_rerank_config()
+    assert rc.w_sim == cfg.rerank.w_sim
+    assert rc.w_pop == cfg.rerank.w_pop
+    assert rc.w_rec == cfg.rerank.w_rec
+    assert rc.mmr_lambda == cfg.rerank.mmr_lambda
+    assert rc.mmr_window == cfg.rerank.mmr_window
+    assert rc.mmr_min_k == cfg.rerank.mmr_min_k
+    assert rc.candidate_multiplier == cfg.rerank.candidate_multiplier
+    assert rc.recency_half_life_days == cfg.rerank.recency_half_life_days
+    assert rc.enable_mmr == cfg.rerank.enable_mmr

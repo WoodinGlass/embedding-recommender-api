@@ -30,6 +30,10 @@ rerank:
   mmr_min_k: 10
   candidate_multiplier: 4
   recency_half_life_days: 90
+  # MMR is off in production until the evaluation (M3.4.9) shows the
+  # blend_mmr arm does not lower NDCG@10 against the blend arm. See
+  # ADR-0016 section "The evaluation table".
+  enable_mmr: false
 
 cache:
   recommend_ttl_seconds: 300
