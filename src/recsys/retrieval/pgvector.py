@@ -102,12 +102,19 @@ class _SearchPlan:
 def _build_search_plan(
     *,
     filters: Mapping[str, str] | None,
+    with_vectors: bool = False,
 ) -> _SearchPlan:
     """Build the SQL and the order of filter values.
 
     The SQL uses named parameters (``%(name)s``), never interpolation. The
     filter field order returned here matches the order the caller must
     supply values in ``%(f_<field>)s``.
+
+    ``with_vectors=True`` adds the raw embedding column to the ``SELECT``
+    list. The cost is one extra column per returned row (384 float32, so
+    ~1.5 KB per candidate); the benefit is that MMR does not need a
+    second round trip. The caller asks for it only when the re-ranker's
+    MMR step is enabled (ADR-0016 § Step 3).
     """
     filter_clauses: list[str] = []
     filter_fields: list[str] = []
@@ -121,9 +128,10 @@ def _build_search_plan(
     if filter_clauses:
         where_filters = "\n  ".join(filter_clauses)
 
+    vector_column = ",\n       e.vector AS vector" if with_vectors else ""
     sql = f"""
 SELECT e.item_id,
-       (e.vector <=> %(query_vec)s::vector) AS distance
+       (e.vector <=> %(query_vec)s::vector) AS distance{vector_column}
 FROM embedding e
 JOIN item i ON i.item_id = e.item_id
 WHERE e.index_version = %(index_version)s
@@ -268,6 +276,46 @@ class PgvectorBackend:
         selective filter is bounded by the number of HNSW candidates the
         pre-0.8 planner is willing to produce.
         """
+        rows = self._execute(vector=vector, k=k, filters=filters, with_vectors=False)
+        return self._rows_to_pairs(rows, k=k)
+
+    def search_with_vectors(
+        self,
+        *,
+        vector: NDArray[np.float32],
+        k: int,
+        filters: Mapping[str, str] | None = None,
+    ) -> list[tuple[str, float, NDArray[np.float32]]]:
+        """Same as :meth:`search`, with the candidate vector on each result.
+
+        Used by the re-ranker's MMR step (ADR-0016 § Step 3): MMR computes
+        pairwise cosine similarity on the candidate vectors, and having
+        them on the result avoids a second round trip. The cost is one
+        extra column per row (~1.5 KB per candidate at 384-dim float32),
+        which is why this is a separate method rather than the default.
+        """
+        rows = self._execute(vector=vector, k=k, filters=filters, with_vectors=True)
+        result: list[tuple[str, float, NDArray[np.float32]]] = []
+        for item_id, distance, raw_vec in rows[:k]:
+            similarity = self._clamp_similarity(1.0 - float(distance))
+            vec = np.asarray(raw_vec, dtype=np.float32)
+            result.append((str(item_id), similarity, vec))
+        return result
+
+    # ------------------------------------------------------------ internals
+    def _execute(
+        self,
+        *,
+        vector: NDArray[np.float32],
+        k: int,
+        filters: Mapping[str, str] | None,
+        with_vectors: bool,
+    ) -> list[tuple[Any, ...]]:
+        """Run the search query and return raw rows.
+
+        ``search`` and ``search_with_vectors`` share this; the only
+        difference is whether the SELECT list includes the vector column.
+        """
         if k <= 0:
             raise ValueError(f"k must be positive, got {k}")
         if vector.ndim != 1:
@@ -282,7 +330,7 @@ class PgvectorBackend:
             )
 
         normalized_filters = validate_filters(filters)
-        plan = _build_search_plan(filters=normalized_filters)
+        plan = _build_search_plan(filters=normalized_filters, with_vectors=with_vectors)
 
         supports_scan = self._pgvector_version.supports_iterative_scan
         fetch_k = k if supports_scan else k * FALLBACK_OVERFETCH
@@ -317,7 +365,7 @@ class PgvectorBackend:
                     (str(self._hnsw_ef_search),),
                 )
                 cur.execute(plan.sql, params)
-                rows = cur.fetchall()
+                rows = list(cur.fetchall())
 
         if normalized_filters is not None and not supports_scan and len(rows) < k:
             log.warning(
@@ -328,15 +376,25 @@ class PgvectorBackend:
                 effective_k=fetch_k,
                 returned=len(rows),
             )
+        return rows
 
+    @staticmethod
+    def _clamp_similarity(similarity: float) -> float:
+        if similarity < _SCORE_MIN:
+            return _SCORE_MIN
+        if similarity > _SCORE_MAX:
+            return _SCORE_MAX
+        return similarity
+
+    def _rows_to_pairs(
+        self,
+        rows: list[tuple[Any, ...]],
+        *,
+        k: int,
+    ) -> list[tuple[str, float]]:
         result: list[tuple[str, float]] = []
         for item_id, distance in rows[:k]:
-            similarity = 1.0 - float(distance)
-            if similarity < _SCORE_MIN:
-                similarity = _SCORE_MIN
-            elif similarity > _SCORE_MAX:
-                similarity = _SCORE_MAX
-            result.append((str(item_id), similarity))
+            result.append((str(item_id), self._clamp_similarity(1.0 - float(distance))))
         return result
 
     # -------------------------------------------------------------- factories

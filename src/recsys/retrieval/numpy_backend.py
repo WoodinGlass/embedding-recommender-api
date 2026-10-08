@@ -237,6 +237,33 @@ class NumpyBackend:
         return result
 
     # --------------------------------------------------------------- filters
+    def search_with_vectors(
+        self,
+        *,
+        vector: NDArray[np.float32],
+        k: int,
+        filters: Mapping[str, str] | None = None,
+    ) -> list[tuple[str, float, NDArray[np.float32]]]:
+        """Same as :meth:`search`, with the candidate vector on each result.
+
+        The vectors are already in memory, so the only extra cost is the
+        copy of each returned row's array (a view into the embedding
+        matrix; the caller may hold it past the next search, so a view is
+        safe, but the return type is a plain array either way). MMR reads
+        it and never mutates it.
+        """
+        pairs = self.search(vector=vector, k=k, filters=filters)
+        result: list[tuple[str, float, NDArray[np.float32]]] = []
+        for item_id, score in pairs:
+            idx = self._index_of.get(item_id)
+            if idx is None:
+                # Unreachable: search() only returns ids that are in the
+                # index. The guard keeps mypy from widening the type.
+                continue
+            row: NDArray[np.float32] = self._embeddings[idx, :]
+            result.append((item_id, score, row))
+        return result
+
     def _build_filter_mask(self, filters: Mapping[str, str]) -> NDArray[np.bool_]:
         """Return a boolean mask of items matching every filter.
 

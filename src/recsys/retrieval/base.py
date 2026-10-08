@@ -27,6 +27,19 @@ class IndexBackend(Protocol):
 
     Implementations are not required to be thread-safe. The serving layer
     (M3) serializes access per backend instance.
+
+    **Optional extension: ``search_with_vectors``.** A backend that can
+    return the candidate vectors without a second round trip may
+    implement ``search_with_vectors(...)`` with the same signature as
+    :meth:`search` but returning ``(item_id, score, vector)`` triples.
+    The re-ranker's MMR step needs those vectors; a backend without the
+    method causes MMR to be skipped with
+    ``recsys_rerank_skipped_total{reason="no_vectors"}`` (ADR-0016 §
+    Step 3). The method is deliberately **not** on this protocol: a
+    backend that does not implement it is still a valid backend, and
+    listing it here would force every fake in every test to add a
+    no-op. The caller detects the capability with
+    ``hasattr(backend, "search_with_vectors")``.
     """
 
     name: str

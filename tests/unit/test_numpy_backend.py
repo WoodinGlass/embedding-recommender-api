@@ -358,3 +358,51 @@ def test_from_run_directory_with_batch_size_smaller_than_catalog(
     results = be.search(vector=q, k=1)
     assert results[0][0] == "i_0000"
     assert results[0][1] == pytest.approx(1.0, abs=1e-5)
+
+
+# --------------------------------------------------------------------------- #
+# search_with_vectors (M3.4.8)
+# --------------------------------------------------------------------------- #
+def test_search_with_vectors_returns_triples() -> None:
+    ids, vecs, meta = _fixture()
+    be = NumpyBackend(item_ids=ids, embeddings=vecs, item_metadata=meta)
+    q = _unit_vector(4, 0)  # nearest to i_0003 (basis vector 0)
+    out = be.search_with_vectors(vector=q, k=4)
+    assert len(out) == 4
+    for item_id, score, vector in out:
+        assert isinstance(item_id, str)
+        assert isinstance(score, float)
+        assert isinstance(vector, np.ndarray)
+        assert vector.shape == (4,)
+        assert vector.dtype == np.float32
+
+
+def test_search_with_vectors_matches_search_order() -> None:
+    """The id and score of each entry match the pair ``search`` returns;
+    only the extra vector column differs."""
+    ids, vecs, meta = _fixture()
+    be = NumpyBackend(item_ids=ids, embeddings=vecs, item_metadata=meta)
+    q = _unit_vector(4, 1)
+    pairs = be.search(vector=q, k=4)
+    triples = be.search_with_vectors(vector=q, k=4)
+    assert [(i, s) for i, s, _ in triples] == pairs
+
+
+def test_search_with_vectors_returns_the_stored_vector() -> None:
+    """The vector on each result is the row that was indexed, byte-for-byte
+    (it is a view into the same matrix)."""
+    ids, vecs, meta = _fixture()
+    be = NumpyBackend(item_ids=ids, embeddings=vecs, item_metadata=meta)
+    q = _unit_vector(4, 2)
+    out = be.search_with_vectors(vector=q, k=4)
+    for item_id, _score, vec in out:
+        idx = ids.index(item_id)
+        assert np.array_equal(vec, vecs[idx])
+
+
+def test_search_with_vectors_respects_filters() -> None:
+    ids, vecs, meta = _fixture()
+    be = NumpyBackend(item_ids=ids, embeddings=vecs, item_metadata=meta)
+    q = _unit_vector(4, 0)
+    out = be.search_with_vectors(vector=q, k=4, filters={"category": "music"})
+    assert all(item_id in ("i_0003", "i_0004") for item_id, _, _ in out)
