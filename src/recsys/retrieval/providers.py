@@ -254,8 +254,24 @@ class PgRecencyProvider:
         if len(item_ids) > self._batch_size:
             raise ProviderError(f"batch too large: {len(item_ids)} > {self._batch_size}")
 
+        # The query runs inside an explicit transaction. Two reasons:
+        #
+        # 1. ``SET LOCAL`` is scoped to the current transaction; outside
+        #    one, psycopg begins an implicit transaction on the first
+        #    statement and leaves it open. If the query then fails, the
+        #    connection is left in the "aborted" state and the next
+        #    statement on the *same connection* fails with
+        #    ``InFailedSqlTransaction``. The provider shares its
+        #    connection with ``PgvectorBackend`` in the evaluation script,
+        #    so a failed recency query would take down the retrieval
+        #    query that follows.
+        #
+        # 2. ``with connection.transaction()`` commits on a clean exit
+        #    and rolls back on an exception. The rollback is what returns
+        #    the connection to a usable state; it is the fix, not a
+        #    side effect.
         try:
-            with self._connection.cursor() as cur:
+            with self._connection.transaction(), self._connection.cursor() as cur:
                 cur.execute(
                     "SET LOCAL statement_timeout = %s",
                     (self._timeout_ms,),
