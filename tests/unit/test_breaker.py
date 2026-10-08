@@ -150,6 +150,27 @@ def test_open_breaker_refuses_call_without_awaiting() -> None:
     assert "redis" in str(exc)
 
 
+def test_is_open_false_after_timer_elapsed() -> None:
+    """After the OPEN window elapses, ``is_open()`` reports False.
+
+    Otherwise a caller that fast-paths on ``is_open()`` (the cache and
+    the limiter both do) would bypass the probe for as long as it kept
+    asking, and a dependency that recovered would never be re-tried.
+    This is the bug the integration test
+    ``test_threshold_failures_then_recovery`` caught.
+    """
+    clock = FakeClock()
+    b = _breaker(clock, failure_threshold=1, open_seconds=5.0)
+    with pytest.raises(ConnectionError):
+        _run(b.call(_boom(ConnectionError("down"))))
+    assert b.is_open() is True
+    clock.advance(5.0)
+    assert b.is_open() is False
+    # And the next call is admitted, closing the breaker.
+    assert _run(b.call(_ok())) == "ok"
+    assert b.state() is CircuitState.CLOSED
+
+
 # ---------------------------------------------------------------- #
 # failure classification (K-A)
 # ---------------------------------------------------------------- #

@@ -178,13 +178,23 @@ class CircuitBreaker:
         return self._state
 
     def is_open(self) -> bool:
-        """Return True when the breaker is refusing calls.
+        """Return True when the breaker is refusing calls right now.
 
-        A caller that only wants a fast yes/no (the cache path does)
-        checks this before building a coroutine; a caller that wants
-        to participate in the HALF_OPEN probe uses :meth:`call`.
+        An OPEN breaker whose timer has elapsed returns False: the next
+        call is admitted as the single probe, so from the caller's point
+        of view the breaker is no longer refusing. Reporting the stored
+        state without applying the timer would let a caller bypass the
+        probe for as long as it kept asking, and a dependency that has
+        recovered would never be re-tried.
+
+        A caller that only wants a fast yes/no (the cache and the
+        limiter do) checks this before building a coroutine; a caller
+        that wants to participate in the HALF_OPEN probe uses
+        :meth:`call` directly.
         """
-        return self._state is CircuitState.OPEN
+        if self._state is not CircuitState.OPEN:
+            return False
+        return self._clock() - self._opened_at < self._current_open_seconds
 
     # ------------------------------------------------------------ #
     # call path
