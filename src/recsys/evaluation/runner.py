@@ -44,6 +44,8 @@ from recsys.evaluation.metrics import (
     recall_at_k,
 )
 from recsys.retrieval.base import IndexBackend
+from recsys.retrieval.providers import PopularityProvider, RecencyProvider
+from recsys.retrieval.rerank import Candidate, RerankConfig, Reranker, RerankError
 
 #: Report schema version. Matches the ``schema_version`` the gate expects.
 REPORT_SCHEMA_VERSION = 1
@@ -106,6 +108,46 @@ class QueryOutcome:
     retrieved: tuple[str, ...]
     metrics: dict[str, float]
     ann_recall_vs_exact: float | None
+
+
+@dataclass(frozen=True)
+class RerankArmResult:
+    """Result of evaluating one rerank arm over the golden set.
+
+    ``status`` is one of:
+
+    - ``"ok"`` — the arm ran and every signal provider answered every
+      query.
+    - ``"degraded"`` — the arm ran, but at least one provider was
+      unavailable for the whole golden set (every query ended up with
+      that signal neutral). The metrics are still produced, but the
+      signal that was supposed to distinguish candidates did not.
+      A reader must not treat a degraded arm's numbers as fully
+      informed.
+    - ``"error"`` — the arm could not run. ``aggregate`` is empty and
+      ``error_message`` carries the reason. The caller (the script)
+      records this and, when the arm is in the gate section of the
+      thresholds file, fails the build. Silent skips are not permitted:
+      an arm that could not run is not the same as an arm that passed.
+
+    ``aggregate`` values are ``float | None``. ``None`` means "this
+    metric does not apply to this arm": ``ann_recall_vs_exact`` is null
+    post-rerank because the reranker deliberately changes the top-k
+    (ADR-0016 § Step 3), and the pre-rerank value is reported separately
+    in ``ann_recall_vs_exact_pre_rerank`` so the retrieval stage stays
+    measurable. The gate skips a null metric; it does not skip a metric
+    that is absent from the report.
+
+    ``provider_missing_rate_popularity`` and
+    ``provider_missing_rate_recency`` are the fraction of queries whose
+    signal came from a provider that raised or timed out. They are the
+    number that turns "degraded" into something an operator can act on.
+    """
+
+    aggregate: dict[str, float | None]
+    outcomes: tuple[QueryOutcome, ...]
+    status: str
+    error_message: str | None = None
 
 
 def evaluate_system(
@@ -198,6 +240,247 @@ def _mean(values: Sequence[float]) -> float:
 
 
 # --------------------------------------------------------------------------- #
+# rerank arm
+# --------------------------------------------------------------------------- #
+def _pick_search_fn(
+    backend: IndexBackend,
+    *,
+    needs_vectors: bool,
+) -> Callable[..., Any]:
+    """Return the backend method the arm should call.
+
+    ``search`` when the arm does not need the candidate vectors; the
+    backend's ``search_with_vectors`` when it does. A backend without
+    the optional method cannot serve a vector-needing arm; the caller
+    turns that into a ``status="error"`` result, not a crash, so a
+    misconfigured arm is visible in the report as an error rather than
+    taking down the whole evaluation.
+    """
+    if not needs_vectors:
+        return backend.search
+    fn = getattr(backend, "search_with_vectors", None)
+    if fn is None:
+        raise EvaluationError(
+            f"backend {backend.name!r} has no search_with_vectors; MMR needs the candidate vectors"
+        )
+    return fn  # type: ignore[no-any-return]
+
+
+def _safe_provider_get(
+    provider: Any,
+    ids: list[str],
+) -> tuple[dict[str, float], bool]:
+    """Call ``provider.get(ids)``; return ``({}, False)`` on failure.
+
+    Any exception counts as a failure. The provider contract is "raise"
+    (see ``recsys.retrieval.providers``): a timeout, a connection error,
+    a batch-too-large error, and a logic error are all the same to the
+    re-ranker (ADR-0016 § Failure behavior) — the signal is neutral for
+    this query. The caller records the missing rate per signal so a
+    provider outage is visible in the report.
+    """
+    if not ids:
+        return {}, True
+    try:
+        result = provider.get(ids)
+    except Exception:
+        return {}, False
+    return {str(k): float(v) for k, v in dict(result).items()}, True
+
+
+def evaluate_rerank_arm(
+    *,
+    backend: IndexBackend,
+    golden_set: GoldenSet,
+    embedding_lookup: EmbeddingLookup,
+    k: int,
+    config: RerankConfig,
+    reranker: Reranker,
+    popularity_provider: PopularityProvider,
+    recency_provider: RecencyProvider,
+    exact_backend: IndexBackend | None = None,
+    include_per_query: bool = False,
+) -> RerankArmResult:
+    """Evaluate one rerank arm over every query in ``golden_set``.
+
+    The pipeline per query:
+
+    1. Encode the query vector from its seed embeddings.
+    2. Retrieve ``candidate_k = k × candidate_multiplier`` candidates.
+       ``search_with_vectors`` is used when MMR will run; ``search``
+       otherwise. The choice mirrors ``mmr_status``: MMR is off when the
+       config disables it, and skipped when ``k < mmr_min_k`` because
+       diversity has no room below that threshold (ADR-0016 § Step 3).
+    3. Fetch popularity and recency in batch. A provider that raises or
+       times out is neutral for that signal on that query; the caller
+       records the missing rate.
+    4. Build the ``Candidate`` list, then call ``reranker.rerank``. A
+       ``RerankError`` means the re-ranker failed on this query; the ADR
+       says the retrieval result is returned. The arm continues.
+    5. Exclude seeds, truncate to ``k``, compute metrics.
+
+    Two fidelity numbers are reported:
+
+    - ``ann_recall_vs_exact`` — always ``None``. The reranker's output
+      deliberately differs from exact kNN (that is what diversification
+      is); computing fidelity post-rerank would measure the wrong
+      thing.
+    - ``ann_recall_vs_exact_pre_rerank`` — the fidelity of the
+      retrieval stage, computed the same way ``evaluate_system`` does
+      for a retrieval-only system. This is what makes the retrieval
+      stage still measurable under an arm that reranks.
+    """
+    if k <= 0:
+        raise EvaluationError(f"k must be positive, got {k}")
+
+    n_queries = len(golden_set.queries)
+    if n_queries == 0:
+        return RerankArmResult(
+            aggregate={},
+            outcomes=(),
+            status="error",
+            error_message="golden set is empty",
+        )
+
+    candidate_k = k * config.candidate_multiplier
+    needs_vectors = config.enable_mmr and k >= config.mmr_min_k
+
+    try:
+        search_fn = _pick_search_fn(backend, needs_vectors=needs_vectors)
+    except EvaluationError as exc:
+        return RerankArmResult(
+            aggregate={},
+            outcomes=(),
+            status="error",
+            error_message=str(exc),
+        )
+
+    recall_values: list[float] = []
+    ndcg_values: list[float] = []
+    mrr_values: list[float] = []
+    pre_fidelity_values: list[float] = []
+    popularity_missing = 0
+    recency_missing = 0
+    outcomes: list[QueryOutcome] = []
+
+    for query in golden_set.queries:
+        query_vec = encode_query(query.seed_item_ids, embedding_lookup=embedding_lookup)
+        seeds = set(query.seed_item_ids)
+
+        raw = search_fn(vector=query_vec, k=candidate_k)
+        pairs: list[tuple[str, float]]
+        vecs: dict[str, NDArray[np.float32]]
+        if needs_vectors:
+            pairs = [(str(iid), float(score)) for iid, score, _v in raw]
+            vecs = {str(iid): v for iid, _s, v in raw}
+        else:
+            pairs = [(str(iid), float(s)) for iid, s in raw]
+            vecs = {}
+
+        # Pre-rerank fidelity, computed exactly like evaluate_system does
+        # for a retrieval-only system. It is the arm's window into the
+        # retrieval stage under reranking.
+        pre_fidelity: float | None = None
+        if exact_backend is not None:
+            exact_pairs = exact_backend.search(vector=query_vec, k=k + len(seeds))
+            exact_filtered = [(str(iid), s) for iid, s in exact_pairs if iid not in seeds][:k]
+            exact_ids = [iid for iid, _ in exact_filtered]
+            pre_filtered = [(iid, s) for iid, s in pairs if iid not in seeds][:k]
+            pre_ids = [iid for iid, _ in pre_filtered]
+            pre_fidelity = ann_recall_vs_exact(pre_ids, exact_ids, k)
+            pre_fidelity_values.append(pre_fidelity)
+
+        # Signal providers: batch per query. Failure is neutral; the
+        # rate is recorded so a provider outage is visible.
+        ids = [iid for iid, _ in pairs]
+        pop_map, pop_ok = _safe_provider_get(popularity_provider, ids)
+        rec_map, rec_ok = _safe_provider_get(recency_provider, ids)
+        if not pop_ok:
+            popularity_missing += 1
+        if not rec_ok:
+            recency_missing += 1
+
+        missing: set[str] = set()
+        if not pop_ok:
+            missing.add("popularity")
+        if not rec_ok:
+            missing.add("recency")
+
+        candidates = [
+            Candidate(
+                item_id=iid,
+                similarity=score,
+                popularity=pop_map.get(iid, 0.0),
+                age_days=rec_map.get(iid, 0.0),
+                vector=vecs.get(iid),
+            )
+            for iid, score in pairs
+        ]
+
+        try:
+            ranked = reranker.rerank(
+                candidates=candidates,
+                k=k + len(seeds),
+                missing_signals=frozenset(missing),
+            )
+        except RerankError:
+            # ADR-0016 § Failure behavior: return the retrieval result.
+            ranked = pairs
+
+        filtered = [(iid, s) for iid, s in ranked if iid not in seeds][:k]
+        retrieved = [iid for iid, _ in filtered]
+        relevant = set(query.relevant_item_ids)
+
+        r = recall_at_k(retrieved, relevant, k)
+        n = ndcg_at_k(retrieved, relevant, k)
+        m = mrr(retrieved, relevant)
+        recall_values.append(r)
+        ndcg_values.append(n)
+        mrr_values.append(m)
+
+        if include_per_query:
+            per_query_metrics: dict[str, float] = {
+                f"recall_at_{k}": r,
+                f"ndcg_at_{k}": n,
+                "mrr": m,
+            }
+            if pre_fidelity is not None:
+                per_query_metrics["ann_recall_vs_exact_pre_rerank"] = pre_fidelity
+            outcomes.append(
+                QueryOutcome(
+                    query_id=query.query_id,
+                    retrieved=tuple(retrieved),
+                    metrics=per_query_metrics,
+                    ann_recall_vs_exact=None,
+                )
+            )
+
+    aggregate: dict[str, float | None] = {
+        f"recall_at_{k}": _mean(recall_values),
+        f"ndcg_at_{k}": _mean(ndcg_values),
+        "mrr": _mean(mrr_values),
+        "ann_recall_vs_exact": None,
+        "provider_missing_rate_popularity": popularity_missing / n_queries,
+        "provider_missing_rate_recency": recency_missing / n_queries,
+    }
+    if pre_fidelity_values:
+        aggregate["ann_recall_vs_exact_pre_rerank"] = _mean(pre_fidelity_values)
+
+    # "degraded" when a provider was unavailable for the whole set: a
+    # signal that should distinguish candidates did not. Partial outages
+    # leave the arm "ok" and are visible in provider_missing_rate_*.
+    status = "ok"
+    if popularity_missing == n_queries or recency_missing == n_queries:
+        status = "degraded"
+
+    return RerankArmResult(
+        aggregate=aggregate,
+        outcomes=tuple(outcomes),
+        status=status,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # report assembly
 # --------------------------------------------------------------------------- #
 def build_report(
@@ -205,7 +488,7 @@ def build_report(
     golden_set_version: str,
     commit: str,
     created_at: str,
-    systems: Mapping[str, Mapping[str, float]],
+    systems: Mapping[str, Mapping[str, float | None]],
     per_query: Mapping[str, Sequence[QueryOutcome]] | None = None,
 ) -> dict[str, Any]:
     """Assemble the report document the gate consumes.
@@ -255,8 +538,10 @@ __all__ = [
     "EmbeddingLookup",
     "EvaluationError",
     "QueryOutcome",
+    "RerankArmResult",
     "build_report",
     "encode_query",
+    "evaluate_rerank_arm",
     "evaluate_system",
     "write_report",
 ]

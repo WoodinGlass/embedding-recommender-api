@@ -310,3 +310,45 @@ def test_mmr_with_enable_false_is_identical_to_blend_only() -> None:
     cfg_off = _cfg(enable_mmr=False)
     out = WeightedBlendReranker(cfg_off).rerank(candidates=cands, k=3)
     assert [iid for iid, _ in out] == ["i_a", "i_b", "i_c"]
+
+
+# ---------------------------------------------------------------- #
+# edge case: all-equal signal does not affect ranking (K3 dari M3.4.9)
+# ---------------------------------------------------------------- #
+def test_all_equal_recency_does_not_change_ranking() -> None:
+    """When every candidate has the same age, the recency signal carries
+    no information and must not influence the order.
+
+    The test is the concrete form of the K3 review note: min-max over a
+    degenerate window returns NEUTRAL_NORM (0.5) for every entry, so the
+    recency term contributes the same amount to every blended score.
+    Whether the signal is present or absent, the ranking is the same.
+    """
+    cands_with_age = [
+        _c("i_a", similarity=0.9, popularity=5.0, age_days=10.0),
+        _c("i_b", similarity=0.5, popularity=5.0, age_days=10.0),
+        _c("i_c", similarity=0.1, popularity=5.0, age_days=10.0),
+    ]
+    cands_neutral = [
+        _c("i_a", similarity=0.9, popularity=5.0, age_days=0.0),
+        _c("i_b", similarity=0.5, popularity=5.0, age_days=0.0),
+        _c("i_c", similarity=0.1, popularity=5.0, age_days=0.0),
+    ]
+    r = _reranker()
+    out_with = [iid for iid, _ in r.rerank(candidates=cands_with_age, k=3)]
+    out_neutral = [iid for iid, _ in r.rerank(candidates=cands_neutral, k=3)]
+    assert out_with == out_neutral == ["i_a", "i_b", "i_c"]
+
+
+def test_all_equal_popularity_does_not_change_ranking() -> None:
+    """Same rule for popularity: a window where every candidate has the
+    same popularity must not see the popularity signal influence the
+    order. rank_norm over a fully-tied list gives every entry the same
+    value, so the blend reduces to similarity + recency."""
+    cands = [
+        _c("i_a", similarity=0.9, popularity=5.0, age_days=1.0),
+        _c("i_b", similarity=0.5, popularity=5.0, age_days=1.0),
+        _c("i_c", similarity=0.1, popularity=5.0, age_days=1.0),
+    ]
+    out = [iid for iid, _ in _reranker().rerank(candidates=cands, k=3)]
+    assert out == ["i_a", "i_b", "i_c"]

@@ -192,8 +192,25 @@ class Reranker(Protocol):
         *,
         candidates: list[Candidate],
         k: int,
+        missing_signals: frozenset[str] = frozenset(),
     ) -> list[tuple[str, float]]:
-        """Return at most ``k`` ``(item_id, score)`` pairs, sorted."""
+        """Return at most ``k`` ``(item_id, score)`` pairs, sorted.
+
+        ``missing_signals`` names the signals whose provider failed for
+        this request (``popularity``, ``recency``). The re-ranker applies
+        the neutral value to every candidate for each named signal; the
+        caller (the evaluation runner, and the M3.6 handler) is what
+        decides which signals to name. Default is the empty set: a caller
+        with no provider information is not a caller whose providers
+        failed.
+
+        The parameter is on the protocol, not only on the concrete
+        implementation, because the failure contract in ADR-0016 §
+        Failure behavior is part of what a re-ranker is: a signal whose
+        provider failed must not influence the order. A protocol that
+        did not name it would let a future implementation ignore the
+        contract silently.
+        """
         ...
 
 
