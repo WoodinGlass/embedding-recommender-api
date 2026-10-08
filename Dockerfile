@@ -61,6 +61,12 @@ COPY --from=builder /opt/venv /opt/venv
 USER recsys
 WORKDIR /home/recsys
 
+# config/hot.yaml is read at startup (ADR-0022). Its default path
+# ("config/hot.yaml" in Settings) is relative, so the file must sit
+# under WORKDIR. The file is committed and carries no secrets; a
+# secret-marker scan rejects it at load time if one appears.
+COPY --chown=recsys:recsys config/ ./config/
+
 EXPOSE 8000
 
 # Liveness-only healthcheck. Readiness (which will check the DB and index from
