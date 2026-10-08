@@ -54,9 +54,17 @@ db = [
 cache = [
   "redis>=5.0,<6.0",
 ]
+# Reads experiments.yaml and config/hot.yaml at API startup (ADR-0017,
+# ADR-0022). The pipeline and the eval script also read YAML, but they
+# carry pyyaml through [dev-lite].
+config = [
+  "pyyaml>=6.0,<7.0",
+]
 auth = [
   "pyjwt>=2.9,<3.0",
-  "passlib[bcrypt]>=1.7,<2.0",
+  # Argon2id is the hash ADR-0013 uses for API keys; bcrypt is not
+  # installed because nothing uses it.
+  "passlib[argon2]>=1.7,<2.0",
 ]
 # Runtime: online ONNX inference. No torch, no sentence-transformers.
 # The M3 API and the M1.3 batch pipeline install only this.
@@ -115,7 +123,7 @@ load = [
 
 # --- meta groups ---
 service = [
-  "embedding-recommender-api[api,db,cache,auth,observability]",
+  "embedding-recommender-api[api,db,cache,auth,config,observability]",
 ]
 # dev-lite: everything needed for lint and unit tests, without the heavy
 # ML runtime (torch/sentence-transformers) or the pipelines. CI uses this for

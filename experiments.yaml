@@ -1,0 +1,44 @@
+# =============================================================================
+# Experiment declarations (ADR-0017).
+#
+# Read once at API startup and validated. A malformed file aborts startup.
+# Adding or changing an experiment requires a deploy (this file is committed
+# on purpose: an experiment is a change to behavior that reviewers should
+# see in a pull request, and that git history should record).
+#
+# Fields:
+#   name          unique, non-empty
+#   salt          unique, non-empty; prefixed by APP_ENV at assignment time
+#                 (so a dev assignment is independent of a prod one).
+#                 A rotate rotates the salt string (append "-v2").
+#   status        running | paused | stopped
+#                 running  -> assign + log exposure
+#                 paused   -> serve control + log exposure (paused=true)
+#                 stopped  -> serve control + no exposure
+#   allocation    {variant: percent}, sums to exactly 100
+#   started_at    ISO 8601 UTC
+#   stopped_at    ISO 8601 UTC, required when status == "stopped"
+#   description   free-form, for reviewers
+#
+# Kill switch (no deploy needed): set EXPERIMENT_DISABLED=1 in the
+# environment and restart the process; every experiment is treated as
+# stopped for that process.
+#
+# See docs/adr/0017-experiment-assignment.md and docs/production-api.md § 8.
+# =============================================================================
+schema_version: 1
+experiments:
+  - name: rerank_mmr
+    salt: "2026-10-08-rerank-mmr-v1"
+    status: stopped
+    allocation:
+      control: 50
+      treatment: 50
+    started_at: "2026-10-08T00:00:00Z"
+    stopped_at: "2026-10-08T00:00:00Z"
+    description: >-
+      Example experiment, shipped stopped. When started, it compares the
+      MMR-diversified re-ranker (treatment) against the blended-only
+      re-ranker (control) on the same retrieval candidates. Its presence
+      here is to exercise the loader and to document the schema; it is not
+      serving traffic.

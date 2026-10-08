@@ -35,13 +35,16 @@ before it can appear in a query, a cache key, a metric label, or a log field.
 ## 1. Data contracts
 
 ### 1.1 `EventEnvelope` (`POST /v1/events`)
+### 1.1 Event ingestion (`POST /v1/events`)
 
-Client-supplied. Idempotent by `event_id`.
+**Batch envelope.** The request body is a list of one to one hundred
+`EventEnvelope` objects (ADR-0018). A single event is the list of one;
+the schema is uniform.
 
 ```python
 from datetime import datetime
-from typing import Literal
-from pydantic import BaseModel, Field, ConfigDict
+from typing import Annotated, Literal
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ExperimentRef(BaseModel):
@@ -54,33 +57,45 @@ class ExperimentRef(BaseModel):
 
 class EventEnvelope(BaseModel):
     """
-    A single interaction event.
-
-    Producer is the client; consumer is the event log table and the offline
-    experiment analyzer. Add fields only via a new ADR; do not repurpose
-    existing ones.
+    A single interaction event. Producer is the client; consumer is the
+    event log table and the offline experiment analyzer. Add fields only
+    via a new ADR; do not repurpose existing ones.
     """
     model_config = ConfigDict(extra="forbid")
 
-    # Identity & idempotency ------------------------------------------------
+    # Identity & idempotency
     event_id: str = Field(
-        description="Client-generated UUIDv4. Uniqueness enforced at ingest.",
+        description=(
+            "Client-generated unique id. Uniqueness enforced at ingest; "
+            "a duplicate is counted, not rejected. If omitted, the server "
+            "generates sha256(f'{request_id}:{index}') and returns it."
+        ),
         min_length=8, max_length=64,
     )
     event_ts: datetime = Field(
-        description="When the event occurred, per the client. UTC.",
+        description=(
+            "When the event occurred, per the client, UTC. Accepted within "
+            "[now - 7 days, now + 5 minutes] (ADR-0018); outside → 422."
+        ),
     )
 
-    # Core fields -----------------------------------------------------------
+    # Core fields
     event_type: Literal["impression", "click", "conversion"]
-    user_id: str = Field(min_length=1, max_length=128)
+    user_id: str = Field(
+        min_length=1, max_length=128,
+        description=(
+            "Raw user id. The server HMAC-SHA256 hashes it with a versioned "
+            "salt before storage; the raw value is discarded after the "
+            "handler returns (ADR-0018)."
+        ),
+    )
     item_id: str = Field(min_length=1, max_length=128)
 
-    # Attribution (nullable: not all events come from a recommend response) -
+    # Attribution (nullable: not every event comes from a recommend response)
     request_id: str | None = Field(default=None, max_length=64)
     experiment: ExperimentRef | None = None
 
-    # Context (free-form but typed; no PII) ---------------------------------
+    # Context (free-form but typed; no PII)
     position: int | None = Field(
         default=None, ge=1,
         description="1-based rank of item_id in the served list, if applicable.",
@@ -88,6 +103,30 @@ class EventEnvelope(BaseModel):
     value: float | None = Field(
         default=None,
         description="Monetary or weighted value for conversion events.",
+    )
+
+
+class EventBatch(BaseModel):
+    """The `POST /v1/events` request body. One to one hundred events."""
+    model_config = ConfigDict(extra="forbid")
+
+    events: Annotated[list[EventEnvelope], Field(min_length=1, max_length=100)]
+
+
+class EventAck(BaseModel):
+    """The `202 Accepted` response body."""
+    model_config = ConfigDict(extra="forbid")
+
+    accepted: int = Field(ge=0)
+    duplicates: int = Field(ge=0)
+    rejected: int = Field(ge=0)
+    generated_event_ids: list[str] | None = Field(
+        default=None,
+        description=(
+            "Parallel to the request's events array; an entry for each event "
+            "whose event_id the client omitted. null when the client "
+            "supplied every id."
+        ),
     )
 ```
 
@@ -100,16 +139,43 @@ class EventEnvelope(BaseModel):
 
 **Server behavior**
 
-- `event_ts` accepted within a bounded skew window (`[now - 7d, now + 5m]`).
-  Outside → `422`.
-- `user_id` is **hashed** with a per-environment salt before storage in any
-  analytical table. The raw value is dropped after the write.
+- **Skew window.** `event_ts` is accepted when it is within
+  `[now - EVENT_TS_MAX_AGE_SECONDS, now + EVENT_TS_MAX_FUTURE_SECONDS]`
+  (defaults: 7 days back, 5 minutes forward). Outside → `422` with the
+  offending timestamp in `error.details`.
+- **Idempotency.** The database has a unique constraint on `event_id`;
+  the insert is `INSERT ... ON CONFLICT (event_id) DO NOTHING`. A
+  duplicate is counted in `EventAck.duplicates`, not rejected.
+- **PII hashing.** The handler computes
+  `user_id_hash = HMAC_SHA256(USER_ID_HASH_SALT, user_id)` and stores the
+  hash alongside `USER_ID_HASH_SALT_VERSION` (an integer). The raw
+  `user_id` never appears in the database, the logs, the metrics, the
+  traces, or an error message. `tests/unit/test_pii_redaction.py`
+  asserts this by running the handler with a sentinel `user_id` and
+  checking the captured output.
+- **Retention.** Events older than `EVENT_RETENTION_DAYS` (default 365)
+  are deleted by a scheduled job (M6). The policy is stated here even
+  though the job lands later; the table's growth is a documented,
+  bounded quantity.
+
+**`POST /v1/events` response**
+
+`202 Accepted` with an `EventAck` body. The status is `202` because the
+events are accepted for recording, not because a downstream consumer has
+processed them.
+
+**Idempotency of the batch itself.** A retry of the same batch with the
+same `event_id`s is idempotent at the row level: the second insert
+conflicts and the `duplicates` count reflects it. A retry of the same
+batch with server-generated ids is idempotent only when the retry uses
+the same `request_id` (the generated ids derive from it). This is
+documented so a client that does not supply `event_id` knows what makes
+its retry safe.
 
 ### 1.2 `RecommendRequest` / `RecommendResponse`
 
 See § 2.1.
 
-### 1.3 Embedding artifacts (M1)
 ### 1.3 Embedding artifacts (M1)
 
 The embedding pipeline produces versioned artifacts on disk. Their names and
@@ -392,7 +458,13 @@ class ExperimentAssignment(BaseModel):
 
 
 class RecommendMeta(BaseModel):
-    source: Literal["cache", "ann", "fallback"]
+    source: Literal[
+        "cache",
+        "ann",
+        "fallback_ann",
+        "fallback_cached",
+        "none",
+    ]
     model_version: str
     index_version: str
     experiment: ExperimentAssignment | None = None
@@ -410,6 +482,21 @@ class RecommendResponse(BaseModel):
 - `len(items) <= k`. May be smaller when filters are very selective.
 - `rank` is contiguous starting at 1.
 - `meta.source` reflects the actual data path taken for this request.
+  The five values are:
+
+  | Value | Meaning |
+  |---|---|
+  | `cache` | Served from Redis (ADR-0015). |
+  | `ann` | Served from the ANN index, re-ranked (ADR-0016). |
+  | `fallback_ann` | The ANN path failed or timed out; a popular list read from the database was returned (ADR-0020 § tier 3). |
+  | `fallback_cached` | The database was unreachable; the same popular list, held in process memory, was returned (ADR-0020 § tier 4). |
+  | `none` | Every tier failed; the response is `503` (ADR-0020 § tier 5). |
+
+  A client that switches on `source` should treat `fallback_ann` and
+  `fallback_cached` as "the recommendation is popular, not personalized".
+  The scores in a fallback response are a placeholder in `(0, 1]`;
+  they are not comparable to an ANN score.
+
 - `meta.experiment` echoes the assignment made by the assignment function;
   it is `null` when no experiment is active for this user.
 
@@ -489,30 +576,207 @@ Every non-2xx response uses this shape. No exceptions.
 
 ---
 
+### 2.6 Health and readiness endpoints
+
+Two endpoints answer two different questions (ADR-0019). A third is kept
+as an alias for backwards compatibility.
+
+#### `GET /livez` and `GET /healthz`
+
+Liveness. Answers "is this process alive enough to keep running" and
+touches no dependency. `200` with:
+
+```json
+{ "status": "alive" }
+```
+
+`/healthz` is an alias: identical body, identical behavior. The M0
+scaffold and the CI Docker smoke test call `/healthz`; `/livez` is the
+name the Kubernetes liveness probe uses.
+
+#### `GET /readyz`
+
+Readiness. Answers "should this instance receive traffic right now".
+Returns a three-state `status` and a structured `checks` object.
+
+```json
+{
+  "status": "ready",
+  "checks": {
+    "db":    { "ok": true,  "latency_ms": 2 },
+    "index": { "ok": true,  "index_version": "idx-a3f9e021", "row_count": 200 },
+    "redis": { "ok": true,  "required": false, "latency_ms": 1 }
+  }
+}
+```
+
+| `status` | HTTP | Meaning |
+|---|---|---|
+| `ready` | 200 | Every required check is `ok`. |
+| `degraded` | 200 | Every required check is `ok`; at least one optional check is not. The instance can serve, more slowly or with less functionality. |
+| `not_ready` | 503 | At least one required check is not `ok`. The instance should be removed from rotation. |
+
+`db` and `index` are required. `redis` is optional; its `checks.redis.required`
+field is `false`, so a caller does not have to read this document to know
+which check can be ignored.
+
+**Failed checks carry an `error` field:**
+
+```json
+{
+  "status": "degraded",
+  "checks": {
+    "db":    { "ok": true,  "latency_ms": 2 },
+    "index": { "ok": true,  "index_version": "idx-a3f9e021", "row_count": 200 },
+    "redis": { "ok": false, "required": false, "error": "timeout" }
+  }
+}
+```
+
+The `error` value is one of a closed set: `timeout`, `connection_refused`,
+`auth_failed`, `not_configured`, `unknown`.
+
+**Timeouts and caching.** Each check has its own hard timeout (500 ms
+for `db` and `index`, 100 ms for `redis`); a check that exceeds it is
+recorded as `ok: false` with `error: "timeout"`. The full set of checks
+runs at most once every `READYZ_CACHE_SECONDS` (default 5); a second
+call within the window returns the cached result without touching a
+dependency. The cache is per process.
+
+**HTTP status for `degraded` is 200.** A Redis hiccup must not drain a
+healthy instance; the body carries the degradation, the status code
+carries "can this instance serve" (yes).
+
 ## 3. Config contract
 
 See [`.env.example`](../.env.example) for values. Enums are validated at
 startup; an invalid value aborts boot rather than falling back silently.
+The five configuration categories (boot, hot, static, runtime,
+evaluation) and the rules for which value belongs where are in
+`docs/adr/0022-config-management.md`.
+
+### 3.1 Boot config (environment variables)
 
 | Env var | Type | Allowed | Default |
 |---|---|---|---|
+| **Application** | | | |
 | `APP_ENV` | enum | `dev`, `staging`, `prod` | `dev` |
 | `LOG_LEVEL` | enum | `DEBUG`, `INFO`, `WARNING`, `ERROR` | `INFO` |
 | `LOG_FORMAT` | enum | `json`, `console` | `json` |
+| `METRICS_ENABLED` | bool | `true`, `false` | `true` |
+| **Auth** (ADR-0013) | | | |
+| `API_KEYS` | comma-list of hashes | non-empty in prod | `dev-key-1` |
+| `API_KEYS_ADMIN` | comma-list of hashes | empty allowed | empty |
+| `JWT_SECRET` | string | ≥ 32 chars, not the sentinel, in prod | sentinel |
+| `JWT_ALGORITHM` | enum | `HS256`, `RS256` | `HS256` |
+| `JWT_MAX_AGE_SECONDS` | int | `> 0` | `86400` |
+| **Rate limit** (ADR-0014) | | | |
+| `RATE_LIMIT_PER_MINUTE` | int | `>= 1` | `600` |
+| `INSTANCE_COUNT` | int | `>= 1` | `1` |
+| **Breaker** (ADR-0015) | | | |
+| `REDIS_BREAKER_FAILURE_THRESHOLD` | int | `>= 1` | `5` |
+| `REDIS_BREAKER_OPEN_SECONDS` | float | `> 0` | `5` |
+| `REDIS_BREAKER_OPEN_MAX_SECONDS` | float | `>= OPEN_SECONDS` | `60` |
+| `REDIS_BREAKER_TIMEOUT_SECONDS` | float | `> 0` | `0.1` |
+| `DB_BREAKER_FAILURE_THRESHOLD` | int | `>= 1` | `5` |
+| `DB_BREAKER_OPEN_SECONDS` | float | `> 0` | `2` |
+| `DB_BREAKER_OPEN_MAX_SECONDS` | float | `>= OPEN_SECONDS` | `30` |
+| `DB_BREAKER_TIMEOUT_SECONDS` | float | `> 0` | `2.0` |
+| **Event ingestion** (ADR-0018) | | | |
+| `EVENT_TS_MAX_AGE_SECONDS` | int | `> 0` | `604800` (7 days) |
+| `EVENT_TS_MAX_FUTURE_SECONDS` | int | `>= 0` | `300` (5 min) |
+| `USER_ID_HASH_SALT` | string | non-empty in prod | sentinel |
+| `USER_ID_HASH_SALT_VERSION` | int | `>= 1` in prod | `0` |
+| `EVENT_RETENTION_DAYS` | int | `> 0` | `365` |
+| **Readiness** (ADR-0019) | | | |
+| `READYZ_CACHE_SECONDS` | int | `0..60` (`0` disables) | `5` |
+| `READYZ_DB_TIMEOUT_SECONDS` | float | `> 0` | `0.5` |
+| `READYZ_INDEX_TIMEOUT_SECONDS` | float | `> 0` | `0.5` |
+| `READYZ_REDIS_TIMEOUT_SECONDS` | float | `> 0` | `0.1` |
+| **Observability** (ADR-0021) | | | |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | string | — | `http://otel-collector:4317` |
+| `OTEL_SERVICE_NAME` | string | — | `recsys-api` |
+| `OTEL_TRACES_SAMPLER_ARG` | float | `0.0..1.0` | `0.1` in prod, `1.0` otherwise |
+| **Config pollers** (ADR-0022) | | | |
+| `HOT_CONFIG_POLL_SECONDS` | int | `>= 1` | `5` |
+| `ACTIVE_INDEX_POLL_SECONDS` | int | `>= 1` | `10` |
+| **Embeddings / retrieval** (M1–M2) | | | |
+| `DATABASE_URL` | string | parseable URL in prod | local |
+| `REDIS_URL` | string | parseable URL in prod | local |
+| `EMBEDDING_MODEL` | string | — | `sentence-transformers/all-MiniLM-L6-v2` |
+| `EMBEDDING_ONNX_PATH` | string | must match `export_onnx.py` output | `artifacts/onnx/sentence-transformers__all-MiniLM-L6-v2` |
+| `EMBEDDING_BATCH_SIZE` | int | `>= 1` | `64` |
 | `INDEX_BACKEND` | enum | `pgvector`, `faiss` | `pgvector` |
 | `DEVICE` | enum | `cpu`, `cuda` | `cpu` |
-| `METRICS_ENABLED` | bool | `true`, `false` | `true` |
 | `HNSW_M` | int | `>= 2` | `16` |
 | `HNSW_EF_CONSTRUCTION` | int | `>= HNSW_M` | `64` |
 | `HNSW_EF_SEARCH` | int | `>= 1` | `100` |
 | `ANN_TIMEOUT_MS` | int | `1..5000` | `120` |
 | `CACHE_TTL_SECONDS` | int | `0..86400` (`0` disables) | `300` |
-| `RATE_LIMIT_PER_MINUTE` | int | `>= 1` | `600` |
+| **Deployment** (ADR-0023) | | | |
+| `PRE_STOP_DELAY_SECONDS` | int | `>= 0` | `5` |
+| **SLO** (ADR-0024) | | | |
+| `LATENCY_SLO_MS` | int | `> 0` | `200` |
 
-**Rule:** production startup requires `APP_ENV=prod` **and** non-empty
-`API_KEYS` **and** non-default `JWT_SECRET`. Startup fails otherwise.
+**Prod guard.** Production startup requires `APP_ENV=prod` **and**:
 
----
+- `API_KEYS` non-empty
+- `JWT_SECRET` not the sentinel value and ≥ 32 characters
+- `USER_ID_HASH_SALT` set (not the sentinel) and
+  `USER_ID_HASH_SALT_VERSION >= 1`
+- `DATABASE_URL` and `REDIS_URL` present and parseable
+
+`API_KEYS_ADMIN` may be empty (a deployment with no admin operations is
+legal). Startup fails on any of the checks above; the failure is at
+process start, not on the first request that needs the value.
+
+### 3.2 Hot config (`config/hot.yaml`)
+
+Read at startup and re-read on every change within
+`HOT_CONFIG_POLL_SECONDS` (ADR-0022). A malformed change is logged and
+the previous value stays in effect.
+
+| Field | Type | Allowed | Default |
+|---|---|---|---|
+| `rate_limit.recommend_per_minute` | int | `>= 1` | `600` |
+| `rate_limit.events_per_minute` | int | `>= 1` | `6000` |
+| `rate_limit.admin_per_minute` | int | `>= 1` | `60` |
+| `rerank.w_sim` | float | `[0, 1]` | `0.7` |
+| `rerank.w_pop` | float | `[0, 1]` | `0.2` |
+| `rerank.w_rec` | float | `[0, 1]` | `0.1` |
+| `rerank.mmr_lambda` | float | `[0, 1]` | `0.7` |
+| `rerank.mmr_window` | int | `>= k` | `50` |
+| `rerank.mmr_min_k` | int | `>= 1` | `10` |
+| `rerank.candidate_multiplier` | int | `>= 1` | `4` |
+| `rerank.recency_half_life_days` | float | `> 0` | `90` |
+| `cache.recommend_ttl_seconds` | int | `0..86400` | `300` |
+| `cache.similar_ttl_seconds` | int | `0..86400` | `600` |
+| `cache.negative_ttl_seconds` | int | `0..3600` | `30` |
+
+The re-ranker weights are validated to sum to `> 0` (not exactly `1`);
+a weight of `0` disables that signal.
+
+### 3.3 Static config (`experiments.yaml`)
+
+Declared at the repository root and read once at startup (ADR-0017).
+The schema is in that ADR; the file is validated before the app serves
+a request. `EXPERIMENT_DISABLED=1` (an environment variable) treats
+every experiment as stopped for this process.
+
+### 3.4 Runtime state and evaluation config
+
+The active index is a row in `index_registry` (ADR-0006) read with a
+`ACTIVE_INDEX_POLL_SECONDS` cache (ADR-0022). The evaluation thresholds
+(`evaluation/thresholds.yaml`, ADR-0010) are read by `scripts/eval.py`
+and by CI; no module under `src/recsys/api/` imports them.
+
+### 3.5 Secrets
+
+Secrets — `JWT_SECRET`, `API_KEYS`, `API_KEYS_ADMIN`,
+`USER_ID_HASH_SALT`, and the password in `DATABASE_URL` — are environment
+variables only. They are never in a committed file, a hot config, a
+database row, or a log line (ADR-0021 § Logs, ADR-0022 § Secrets).
+
 
 ## 4. Telemetry contract
 
@@ -521,27 +785,50 @@ stable; renaming requires an ADR.
 
 ### 4.1 Metric names
 
-Format: `recsys_<subsystem>_<name>_<unit>` (Prometheus conventions).
+Format: `recsys_<subsystem>_<name>_<unit>` (Prometheus conventions). The
+table below is the complete registry; a metric emitted by the code but
+not listed here is a contract violation caught by
+`tests/unit/test_metric_contract.py`.
 
 | Metric | Type | Labels | Notes |
 |---|---|---|---|
-| `recsys_requests_total` | counter | `route`, `method`, `status`, `source` | `source` ∈ `cache`/`ann`/`fallback` |
-| `recsys_request_duration_seconds` | histogram | `route`, `source`, `status` | Buckets include `0.2` s so the target is directly measurable |
-| `recsys_cache_requests_total` | counter | `result` | `result` ∈ `hit`/`miss`/`bypass`/`error` |
-| `recsys_fallback_total` | counter | `reason` | `reason` ∈ `db_down`/`ann_timeout`/`cold_start`/`index_missing` |
-| `recsys_errors_total` | counter | `type` | `type` is a bounded allowlist, not a raw exception class |
-| `recsys_embedding_drift_score` | gauge | `window` | Centroid cosine shift over recent queries vs reference |
-| `recsys_active_index_info` | gauge | `index_version`, `model_version` | Always `1`; use `info` pattern for joins |
-| `recsys_experiment_exposures_total` | counter | `experiment`, `variant` | Emitted when a variant is actually served |
-| `recsys_rate_limit_degraded` | gauge | — | `1` when shared Redis limiter is unavailable |
+| `recsys_requests_total` | counter | `route`, `method`, `status`, `source` | `source` ∈ `cache`/`ann`/`fallback_ann`/`fallback_cached` (ADR-0020 extends the M0 set) |
+| `recsys_request_duration_seconds` | histogram | `route`, `source`, `status` | Buckets include `0.2` s so the latency SLO (ADR-0024) is directly measurable |
+| `recsys_cache_requests_total` | counter | `result` | `result` ∈ `hit`/`miss`/`bypass`/`error` (ADR-0015) |
+| `recsys_cache_negative_hits_total` | counter | — | Hits on a negative entry (ADR-0015) |
+| `recsys_cache_write_errors_total` | counter | `type` | A write that failed after a successful read (ADR-0015) |
+| `recsys_fallback_total` | counter | `tier` | `tier` ∈ `fallback_ann`/`fallback_cached` (ADR-0020; the M0 `reason` label is renamed) |
+| `recsys_errors_total` | counter | `type` | `type` ∈ `auth`/`validation`/`retrieval`/`cache`/`upstream`/`internal` |
+| `recsys_rerank_duration_seconds` | histogram | `arm` | Time spent in the re-ranker, by experiment arm (ADR-0016) |
+| `recsys_rerank_failures_total` | counter | `step`, `type` | `step` ∈ `normalize`/`blend`/`mmr` (ADR-0016) |
+| `recsys_rerank_skipped_total` | counter | `reason` | `reason` ∈ `no_vectors`/`k_below_threshold` (ADR-0016) |
+| `recsys_rate_limit_hits_total` | counter | `class`, `result` | `result` ∈ `allowed`/`limited` (ADR-0014) |
+| `recsys_rate_limit_remaining` | histogram | `class` | Tokens left at decision time (ADR-0014) |
+| `recsys_rate_limit_degraded` | gauge | — | `1` when the per-instance fallback limiter is active (ADR-0014) |
+| `recsys_rate_limit_lua_errors_total` | counter | `type` | Lua script failures by category (ADR-0014) |
+| `recsys_circuit_breaker_state` | gauge | `name` | `name` ∈ `redis`/`postgres`; `0` closed, `1` half-open, `2` open (ADR-0015) |
+| `recsys_circuit_breaker_trips_total` | counter | `name`, `reason` | `reason` ∈ `failures`/`timeouts` (ADR-0015) |
+| `recsys_experiment_exposures_total` | counter | `experiment`, `variant` | Both from `experiments.yaml`; emitted when a variant is served (ADR-0017) |
+| `recsys_experiment_exposure_errors_total` | counter | `type` | A failed exposure write (ADR-0017) |
+| `recsys_readyz_status` | gauge | `status` | `status` ∈ `ready`/`degraded`/`not_ready` (ADR-0019) |
+| `recsys_readyz_check_duration_seconds` | histogram | `check` | `check` ∈ `db`/`index`/`redis` (ADR-0019) |
+| `recsys_active_index_info` | gauge | `index_version`, `model_version` | Always `1`; `info` pattern for joins (M2) |
+| `recsys_embedding_drift_score` | gauge | `window` | Centroid cosine shift; M4 (ADR-0021 defers) |
 
-**Cardinality guardrails**
+**Cardinality guardrails** (ADR-0021 § Metrics)
 
-- No label may take unbounded values (`user_id`, `request_id`, raw URLs).
-- `error.type` is mapped to a fixed set: `auth`, `validation`, `retrieval`,
-  `cache`, `upstream`, `internal`.
-- `route` uses the **path template** (`/v1/items/{item_id}/similar`), never
+- No label may take unbounded values (`user_id`, `item_id`, `request_id`,
+  `trace_id`, `event_id`, raw URLs, a resolved path).
+- A label value is drawn from a set known at build time: an enum, a
+  route template, a config-defined class, an experiment name from
+  `experiments.yaml`.
+- `error.type` and the other `type` labels are mapped to closed sets;
+  the code contains the mapping function, not `type(exc).__name__`.
+- `route` uses the path template (`/v1/items/{item_id}/similar`), never
   the resolved path.
+- The label set on a metric is fixed for the metric's lifetime. Adding
+  a label is a contract change (this section is updated in the same PR).
+
 
 ### 4.2 Log fields (structlog JSON)
 
@@ -612,6 +899,47 @@ promote). No per-request log line is emitted from the retrieval layer
 itself; the access log (§ 4.2, `http.request`) covers request-level
 tracing, and it carries the `source` label from § 4.1.
 
+### 4.5 API log events (M3)
+
+The events below are emitted by the API and its middleware. They follow
+the same rules as § 4.4 (`event` naming convention, `schema_version=1`,
+reserved fields, no raw credential, no raw `user_id`).
+
+| Event | Level | When | Extra fields |
+|---|---|---|---|
+| `http.request` | INFO | Every request, on the response path | `route`, `method`, `status`, `duration_ms`, `source` |
+| `auth.ok` | DEBUG | A credential validated | `principal.kind` (`api_key` / `jwt`), `scopes.count` |
+| `auth.failed` | WARNING | A credential was rejected | `reason` ∈ `missing`/`invalid`/`expired`/`iat_too_old`/`unknown_kid`/`no_scope`; never the credential |
+| `auth.validator_unavailable` | ERROR | The validator could not run (fail-closed path, ADR-0013) | `error.type` |
+| `ratelimit.limited` | INFO | A request was refused | `class`, `credential_hash_prefix`, `retry_after_seconds` |
+| `ratelimit.degraded` | WARNING | Once per process when the fallback limiter activates, once when it deactivates | `instance_count`, `effective_limit_per_minute` |
+| `cache.hit` | DEBUG | A cache lookup hit | `cache.key.kind` |
+| `cache.miss` | DEBUG | A cache lookup missed | `cache.key.kind` |
+| `cache.bypass` | WARNING | The breaker is open; the lookup was skipped | `name` (`redis`), `reason` |
+| `cache.error` | WARNING | A cache read or write raised | `operation` (`get`/`set`), `error.type` |
+| `retrieval.fallback.ann` | WARNING | Tier 3 was reached | `reason` ∈ `timeout`/`error`, `ann_timeout_ms`, `latency_ms` |
+| `retrieval.fallback.cached` | WARNING | Tier 4 was reached | `reason` ∈ `db_breaker_open`/`db_error`, `cache_age_seconds`, `row_count` |
+| `retrieval.fallback.none` | ERROR | Tier 5; the response is `503` | the reasons every tier failed |
+| `rerank.mmr.skipped` | DEBUG | MMR was not applied | `reason` ∈ `no_vectors`/`k_below_threshold` |
+| `rerank.signal.missing` | WARNING | A re-ranker signal provider raised; treated as neutral | `signal` (`popularity`/`recency`) |
+| `rerank.failed` | WARNING | A re-ranker step raised; the retrieval list is returned | `step` ∈ `normalize`/`blend`/`mmr`, `error.type` |
+| `experiment.assigned` | DEBUG | A variant was assigned | `experiment`, `variant`, `bucket` |
+| `experiment.exposure.written` | DEBUG | The exposure row was written | `experiment`, `variant` |
+| `experiment.exposure.failed` | WARNING | The exposure write raised | `experiment`, `error.type` |
+| `experiment.disabled` | WARNING | `EXPERIMENT_DISABLED=1` and a request would have been assigned | `experiment` |
+| `events.ingested` | INFO | A batch was written | `accepted`, `duplicates`, `rejected`, `batch_size` |
+| `events.rejected` | WARNING | A batch item was rejected by validation | `index`, `reason` |
+| `readyz.check.failed` | WARNING | A readiness check returned not-ok | `check` (`db`/`index`/`redis`), `error` |
+| `readyz.status.changed` | INFO | The three-state status changed between checks | `from`, `to` |
+
+**`auth.failed` is the only auth log line at WARNING.** A `auth.ok`
+line is DEBUG so a healthy request does not add an INFO line per
+attempt; the access log carries the request-level detail.
+
+**The credential never appears.** `credential_hash_prefix` is the first
+8 hex characters of the BLAKE2b hash the rate limiter uses (ADR-0014),
+not the credential.
+
 ## 5. Idempotency matrix
 
 Filled here so that every write endpoint has an explicit answer to "what
@@ -619,17 +947,28 @@ happens on retry?".
 
 | Operation | Key | Behavior on retry |
 |---|---|---|
-| `POST /v1/events` | `event_id` (client UUIDv4) | `INSERT ... ON CONFLICT (event_id) DO NOTHING`. Response counts duplicate. |
-| Embed item | `sha256(model_version + content_hash)` | Skip if row exists with the same key. |
-| Build index | `sha256(index_backend + params + catalog_snapshot + model_version)` | New `index_version` row; the live pointer does not move. |
-| Promote index | `index_version` (target) | Idempotent: promoting the already-active version is a no-op. |
-| A/B assignment | `sha256(f"{experiment_salt}:{user_id}") % 10_000` | Pure function; no state. |
-| Cache write | `sha256(index_version + variant + filters + seed_items + k)` | Overwrite on same key; TTL bounds staleness. |
-| Churn score | none (read-only) | Safe to retry. |
+| `POST /v1/events` | `event_id` (client-supplied, or server-generated `sha256(f"{request_id}:{index}")`) | `INSERT ... ON CONFLICT (event_id) DO NOTHING`. The response counts the duplicate in `EventAck.duplicates`. |
+| Exposure write | `sha256(f"exposure:{experiment}:{request_id}")` | Same table as `POST /v1/events`; a duplicate is ignored. The exposure is written once per served variant per request (ADR-0017). |
+| `POST /v1/recommend` | None (read-only). The cache write is best-effort. | Safe to retry. The response's `request_id` differs; the cache write is idempotent under the same key (ADR-0015). |
+| `GET /v1/items/{item_id}/similar` | None (read-only). | Safe to retry. |
+| A/B assignment | `sha256(f"{APP_ENV}:{experiment_salt}:{user_id}") % 10_000` | Pure function; no state. The same `(user_id, experiment, environment)` produces the same bucket (ADR-0017). |
+| Cache write | `cache:v1:{class}:{blake2b-16(request)}[:{variant}]` | Overwrite on the same key. The TTL and jitter bound staleness (ADR-0015). |
+| Embed item | `sha256(model_version + content_hash)` | Skip if a row exists with the same key (M1). |
+| Build index | `sha256(index_backend + params + catalog_snapshot + model_version + preprocessing_version + metric + pgvector_version)` | A new `index_version` row; the live pointer does not move (M2, ADR-0007). |
+| Promote index | `index_version` (target) | Idempotent: promoting the already-active version is a no-op (M2). |
+| Rollback index | The most recently retired `index_version` | Idempotent: rolling back when there is nothing retired raises `PromoteError` with a clear message (M2). |
+| Churn score | None (read-only) | Safe to retry. *(M7)* |
 
 **Rule:** if an operation is not in this table, it must be a pure read.
+A write that is not here is a contract violation caught by review.
 
----
+**Why `POST /v1/recommend` is a read, not a write.** The request does
+not modify the catalog, the index, or the experiment state. It writes to
+the cache and to the exposure log, but both writes are keyed by a
+request-derived value and are idempotent under that key. From the
+client's perspective, the request is safe to retry: the same inputs
+produce the same result, and the duplicate writes are bounded.
+
 
 ## 6. Change management
 

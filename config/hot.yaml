@@ -1,0 +1,37 @@
+# =============================================================================
+# Hot config (ADR-0022).
+#
+# Read at startup and re-read on every change within HOT_CONFIG_POLL_SECONDS
+# (default 5). A malformed change is logged at ERROR and the previous value
+# stays in effect; the process does not crash.
+#
+# This file is committed. It must not contain secrets: a field named
+# "secret", "password", "token", "key", or "salt" is rejected at load time.
+#
+# Precedence: for rate limits, this file's per-class values override
+# RATE_LIMIT_PER_MINUTE from the environment. Other sections have no
+# environment equivalent.
+#
+# See docs/adr/0022-config-management.md and docs/production-api.md § 12.
+# =============================================================================
+schema_version: 1
+
+rate_limit:
+  recommend_per_minute: 600
+  events_per_minute: 6000
+  admin_per_minute: 60
+
+rerank:
+  w_sim: 0.7
+  w_pop: 0.2
+  w_rec: 0.1
+  mmr_lambda: 0.7
+  mmr_window: 50
+  mmr_min_k: 10
+  candidate_multiplier: 4
+  recency_half_life_days: 90
+
+cache:
+  recommend_ttl_seconds: 300
+  similar_ttl_seconds: 600
+  negative_ttl_seconds: 30
