@@ -25,6 +25,7 @@ from typing import Any, TypeVar
 import pytest
 
 from recsys.rate_limit.limiter import RateLimitDecision, TokenBucketLimiter
+from recsys.resilience.breaker import CircuitBreaker
 
 pytestmark = [pytest.mark.integration]
 
@@ -81,11 +82,20 @@ def redis_url() -> str:
 
 @pytest.fixture
 def limiter(redis_url: str) -> TokenBucketLimiter:
+    # The breaker is intentionally generous here: a healthy Redis should
+    # never trip it, and these tests exercise the Lua script, not breaker
+    # behavior (which has its own unit tests in tests/unit/test_breaker.py).
+    breaker = CircuitBreaker(
+        name="redis",
+        failure_threshold=5,
+        open_seconds=1.0,
+        open_max_seconds=10.0,
+    )
     return TokenBucketLimiter(
         redis_url=redis_url,
         instance_count=1,
         bucket_seconds=60.0,
-        cooldown_seconds=5.0,
+        breaker=breaker,
     )
 
 

@@ -1,19 +1,81 @@
-"""Unit tests for TokenBucketLimiter (fallback + cooldown paths).
+"""Unit tests for TokenBucketLimiter (fallback + breaker paths).
 
 The Redis path itself is exercised against a real Redis in
 tests/integration/test_rate_limit_lua.py; here we cover the in-process
-fallback and the cooldown state machine without touching the network.
+fallback and the shared breaker without touching the network.
 """
 
 from __future__ import annotations
 
 import asyncio
-import time
+import contextlib
 from typing import Any
 
 import pytest
 
 from recsys.rate_limit.limiter import RateLimitDecision, TokenBucketLimiter
+from recsys.resilience.breaker import CircuitBreaker
+
+
+# ---------------------------------------------------------------- #
+# helpers
+# ---------------------------------------------------------------- #
+def _breaker(
+    *,
+    failure_threshold: int = 1,
+    open_seconds: float = 60.0,
+) -> CircuitBreaker:
+    return CircuitBreaker(
+        name="redis",
+        failure_threshold=failure_threshold,
+        open_seconds=open_seconds,
+        open_max_seconds=open_seconds * 12,
+    )
+
+
+def _limiter(
+    *,
+    instance_count: int = 1,
+    bucket_seconds: float = 60.0,
+    breaker: CircuitBreaker | None = None,
+) -> TokenBucketLimiter:
+    return TokenBucketLimiter(
+        redis_url="redis://unused",
+        instance_count=instance_count,
+        bucket_seconds=bucket_seconds,
+        breaker=breaker or _breaker(),
+    )
+
+
+async def _boom_conn() -> None:
+    raise ConnectionError("forced")
+
+
+def _force_fallback(limiter: TokenBucketLimiter) -> TokenBucketLimiter:
+    """Trip the limiter's breaker so the fallback path is active.
+
+    Pre-tripping the breaker is the M3.3 equivalent of M3.2's
+    "pre-set cooldown": it short-circuits the Redis path so a unit
+    test never opens a socket. The ``ConnectionError`` the probe
+    raises is the signal the breaker records; it is suppressed here
+    because the test cares about the post-condition, not the probe.
+    """
+    with contextlib.suppress(ConnectionError):
+        asyncio.run(limiter._breaker.call(_boom_conn()))
+    assert limiter._breaker.is_open()
+    return limiter
+
+
+class _BoomLimiter(TokenBucketLimiter):
+    """Limiter whose Redis path always raises, to exercise the breaker."""
+
+    def __init__(self, *, breaker: CircuitBreaker, **kwargs: Any) -> None:
+        super().__init__(breaker=breaker, **kwargs)
+        self.redis_calls = 0
+
+    async def _redis_check(self, **kwargs: Any) -> RateLimitDecision:
+        self.redis_calls += 1
+        raise ConnectionError("boom")
 
 
 # ---------------------------------------------------------------- #
@@ -25,7 +87,7 @@ def test_instance_count_must_be_positive() -> None:
             redis_url="redis://x",
             instance_count=0,
             bucket_seconds=60.0,
-            cooldown_seconds=5.0,
+            breaker=_breaker(),
         )
 
 
@@ -35,17 +97,7 @@ def test_bucket_seconds_must_be_positive() -> None:
             redis_url="redis://x",
             instance_count=1,
             bucket_seconds=0.0,
-            cooldown_seconds=5.0,
-        )
-
-
-def test_cooldown_seconds_must_be_non_negative() -> None:
-    with pytest.raises(ValueError, match="cooldown_seconds"):
-        TokenBucketLimiter(
-            redis_url="redis://x",
-            instance_count=1,
-            bucket_seconds=60.0,
-            cooldown_seconds=-1.0,
+            breaker=_breaker(),
         )
 
 
@@ -56,20 +108,7 @@ def test_check_rejects_zero_limit() -> None:
 
 
 # ---------------------------------------------------------------- #
-# is_cooldown_active
-# ---------------------------------------------------------------- #
-def test_cooldown_initially_inactive() -> None:
-    assert _limiter().is_cooldown_active() is False
-
-
-def test_cooldown_active_after_enter() -> None:
-    limiter = _limiter(cooldown_seconds=60.0)
-    limiter._enter_cooldown(RuntimeError("x"))
-    assert limiter.is_cooldown_active() is True
-
-
-# ---------------------------------------------------------------- #
-# fallback path (cooldown pre-set so Redis is never contacted)
+# fallback path (breaker pre-tripped, so Redis is never contacted)
 # ---------------------------------------------------------------- #
 def test_fallback_allows_first_request() -> None:
     limiter = _force_fallback(_limiter(instance_count=1))
@@ -139,82 +178,58 @@ def test_fallback_refills_over_time() -> None:
 
 
 # ---------------------------------------------------------------- #
-# cooldown state machine (Redis raising)
+# breaker integration (Redis raising)
 # ---------------------------------------------------------------- #
-def test_redis_failure_enters_cooldown_and_falls_back() -> None:
+def test_redis_failure_opens_breaker_and_falls_back() -> None:
+    breaker = _breaker(failure_threshold=1, open_seconds=60.0)
     limiter = _BoomLimiter(
+        breaker=breaker,
         redis_url="redis://x",
         instance_count=1,
         bucket_seconds=60.0,
-        cooldown_seconds=60.0,
     )
     d = asyncio.run(limiter.check(class_name="recommend", bucket_id="u", limit_per_minute=60))
     assert d.degraded is True
     assert d.allowed is True
     assert limiter.redis_calls == 1
-    assert limiter.is_cooldown_active() is True
+    assert breaker.is_open() is True
 
 
-def test_cooldown_prevents_repeated_redis_probes() -> None:
+def test_open_breaker_prevents_repeated_redis_probes() -> None:
+    breaker = _breaker(failure_threshold=1, open_seconds=60.0)
     limiter = _BoomLimiter(
+        breaker=breaker,
         redis_url="redis://x",
         instance_count=1,
         bucket_seconds=60.0,
-        cooldown_seconds=60.0,
     )
     for _ in range(5):
         asyncio.run(limiter.check(class_name="recommend", bucket_id="u", limit_per_minute=60))
-    # After the first failure, the cooldown window swallows the rest.
+    # After the first failure opened the breaker, the fast path in
+    # check() skips _redis_check entirely.
     assert limiter.redis_calls == 1
 
 
-def test_cooldown_anchored_to_last_failure() -> None:
-    """A second call inside the cooldown window must not extend the window
-    and must not probe Redis again (this is the whole point of the design)."""
-    limiter = _BoomLimiter(
+def test_logic_error_does_not_open_breaker() -> None:
+    """A non-failure exception (a caller bug) must not trip the breaker.
+
+    The limiter still falls back — a rate limiter must not fail a
+    request because the limiter itself has a bug — but the shared
+    breaker stays closed, so the cache path is not affected.
+    """
+
+    class LogicBoom(TokenBucketLimiter):
+        async def _redis_check(self, **kwargs: Any) -> RateLimitDecision:
+            raise ValueError("caller bug")
+
+    breaker = _breaker(failure_threshold=1, open_seconds=60.0)
+    limiter = LogicBoom(
+        breaker=breaker,
         redis_url="redis://x",
         instance_count=1,
         bucket_seconds=60.0,
-        cooldown_seconds=5.0,
     )
-    asyncio.run(limiter.check(class_name="x", bucket_id="u", limit_per_minute=60))
-    first_until = limiter._cooldown_until
-    time.sleep(0.05)
-    asyncio.run(limiter.check(class_name="x", bucket_id="u", limit_per_minute=60))
-    assert limiter.redis_calls == 1
-    assert limiter._cooldown_until == first_until
-
-
-# ---------------------------------------------------------------- #
-# helpers
-# ---------------------------------------------------------------- #
-def _limiter(
-    *,
-    instance_count: int = 1,
-    bucket_seconds: float = 60.0,
-    cooldown_seconds: float = 5.0,
-) -> TokenBucketLimiter:
-    return TokenBucketLimiter(
-        redis_url="redis://unused",
-        instance_count=instance_count,
-        bucket_seconds=bucket_seconds,
-        cooldown_seconds=cooldown_seconds,
-    )
-
-
-def _force_fallback(limiter: TokenBucketLimiter) -> TokenBucketLimiter:
-    # Pre-set a long cooldown so the Redis path is never attempted.
-    limiter._cooldown_until = time.time() + 3600.0
-    return limiter
-
-
-class _BoomLimiter(TokenBucketLimiter):
-    """Limiter whose Redis path always raises, so the cooldown path runs."""
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.redis_calls = 0
-
-    async def _redis_check(self, **kwargs: Any) -> RateLimitDecision:
-        self.redis_calls += 1
-        raise ConnectionError("boom")
+    d = asyncio.run(limiter.check(class_name="recommend", bucket_id="u", limit_per_minute=60))
+    assert d.degraded is True
+    assert d.allowed is True
+    assert breaker.is_open() is False

@@ -21,6 +21,7 @@ from recsys.config.settings import Settings, get_settings
 from recsys.monitoring.logging import configure_logging, get_logger
 from recsys.monitoring.tracing import configure_tracing
 from recsys.rate_limit import TokenBucketLimiter
+from recsys.resilience import CircuitBreaker
 
 
 def _build_hot_store(settings: Settings, log: object) -> HotConfigStore:
@@ -53,20 +54,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_tracing(settings)
     log = get_logger(__name__)
 
-    # The limiter is built before the middleware stack because
-    # ``add_middleware`` instantiates the middleware immediately. The
-    # lifespan only closes the Redis connection on shutdown.
+    # The limiter and the breaker are built before the middleware stack
+    # because ``add_middleware`` instantiates the middleware immediately.
+    # The breaker is shared with the response cache (ADR-0015): Redis is
+    # one dependency, and one breaker guards it. The lifespan only closes
+    # the Redis connection on shutdown.
+    #
+    # The breaker's on_transition callback is wired to Prometheus in
+    # M3.3.6; until then the transition events are emitted into the void.
+    redis_breaker = CircuitBreaker(
+        name="redis",
+        failure_threshold=settings.redis_breaker_failure_threshold,
+        open_seconds=settings.redis_breaker_open_seconds,
+        open_max_seconds=settings.redis_breaker_open_max_seconds,
+    )
     limiter = TokenBucketLimiter(
         redis_url=settings.redis_url,
         instance_count=settings.instance_count,
         bucket_seconds=settings.rate_limit_bucket_seconds,
-        cooldown_seconds=settings.redis_breaker_open_seconds,
+        breaker=redis_breaker,
     )
     hot_store = _build_hot_store(settings, log)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.limiter = limiter
+        app.state.redis_breaker = redis_breaker
         app.state.hot_config = hot_store
         try:
             yield

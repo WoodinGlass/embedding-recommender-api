@@ -11,22 +11,20 @@ The design:
 - A per-instance in-memory bucket when Redis is unreachable. The
   fallback's limit is the configured limit divided by
   ``INSTANCE_COUNT`` so the aggregate across instances stays close to
-  the configured number. See ADR-0014.
-- A cooldown after a Redis failure: once the connection is broken, the
-  limiter stops trying Redis for ``REDIS_BREAKER_OPEN_SECONDS``. The
-  timer is based on the *last failure*, not on every request, so a
-  Redis that stays broken is not probed per request. This is a
-  deliberate simplification of the circuit breaker that lands in M3.3;
-  the interface (``is_cooldown_active``) is what M3.3's breaker plugs
-  into. It is named ``cooldown`` and not ``breaker`` so the two are
-  never confused.
+  the configured number.
+- **A shared circuit breaker (ADR-0015) is consulted before every
+  Redis call.** The breaker lives under ``resilience/`` and is shared
+  with the response cache because Redis is one dependency. When the
+  breaker is open the limiter goes straight to its per-instance
+  fallback; a Redis that is down is not probed per request.
 
 The Lua script is a string constant, not a file on disk: one file to
-review for how the limiter works, no package-data configuration to keep
-in sync, and the script's changes are visible in a ``git diff`` as a
-Python string. A dedicated integration test
+review for how the limiter works, no package-data configuration to
+keep in sync, and the script's changes are visible in a ``git diff``
+as a Python string. A dedicated integration test
 (``tests/integration/test_rate_limit_lua.py``) runs the script against
-a real Redis so a typo in a ``redis.call`` is caught before production.
+a real Redis so a typo in a ``redis.call`` is caught before
+production.
 """
 
 from __future__ import annotations
@@ -38,9 +36,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Final
 
-from recsys.monitoring.logging import get_logger
-
-log = get_logger(__name__)
+from recsys.resilience.breaker import CircuitBreaker, CircuitOpenError
 
 #: The Lua script.
 #:
@@ -111,6 +107,10 @@ class TokenBucketLimiter:
     The Redis path is server-side atomic and does not need a lock. The
     fallback dictionary is guarded by an asyncio lock so two concurrent
     requests cannot both read-modify-write the same in-memory bucket.
+
+    The breaker is passed in, not built here: the same breaker guards
+    the response cache (ADR-0015), and constructing it twice would
+    defeat the point.
     """
 
     def __init__(
@@ -119,24 +119,20 @@ class TokenBucketLimiter:
         redis_url: str,
         instance_count: int,
         bucket_seconds: float,
-        cooldown_seconds: float,
+        breaker: CircuitBreaker,
     ) -> None:
         if instance_count < 1:
             raise ValueError(f"instance_count must be >= 1, got {instance_count}")
         if bucket_seconds <= 0:
             raise ValueError(f"bucket_seconds must be > 0, got {bucket_seconds}")
-        if cooldown_seconds < 0:
-            raise ValueError(f"cooldown_seconds must be >= 0, got {cooldown_seconds}")
 
         self._redis_url = redis_url
         self._instance_count = instance_count
         self._bucket_seconds = bucket_seconds
-        self._cooldown_seconds = cooldown_seconds
+        self._breaker = breaker
 
         self._redis: Any = None
         self._script: Any = None
-        self._cooldown_until: float = 0.0
-        self._cooldown_logged: bool = False
 
         self._fallback: dict[str, _InMemoryBucket] = {}
         self._fallback_lock = asyncio.Lock()
@@ -152,15 +148,6 @@ class TokenBucketLimiter:
                 await self._redis.aclose()
             self._redis = None
             self._script = None
-
-    def is_cooldown_active(self) -> bool:
-        """Return True while the limiter is skipping Redis.
-
-        This is the whole interface M3.3's breaker will implement. Any
-        change to how the fallback is triggered stays behind this
-        method so callers do not have to know.
-        """
-        return time.time() < self._cooldown_until
 
     # ------------------------------------------------------------------ #
     # public API
@@ -178,6 +165,11 @@ class TokenBucketLimiter:
         ``admin``, ``ip``); it is part of the key. ``bucket_id`` is the
         identifier for the subject being limited: a credential hash for
         the credential bucket, an IP for the IP bucket.
+
+        The Redis call is wrapped by the shared breaker. A refusal
+        (breaker open, or a failed call) is not a request failure: the
+        limiter falls back to its per-instance bucket and marks the
+        decision ``degraded=True``.
         """
         if limit_per_minute < 1:
             raise ValueError(f"limit_per_minute must be >= 1, got {limit_per_minute}")
@@ -187,34 +179,32 @@ class TokenBucketLimiter:
         key = f"{bucket_id}:{class_name}"
         now = time.time()
 
-        if now < self._cooldown_until:
+        # Fast path: an open breaker means "do not build the coroutine".
+        if self._breaker.is_open():
             return await self._fallback_check(
-                key=key,
-                capacity=capacity,
-                refill_rate=refill_rate,
-                now=now,
+                key=key, capacity=capacity, refill_rate=refill_rate, now=now
             )
 
         try:
-            return await self._redis_check(
-                key=key,
-                capacity=capacity,
-                refill_rate=refill_rate,
-                now=now,
+            return await self._breaker.call(
+                self._redis_check(key=key, capacity=capacity, refill_rate=refill_rate, now=now)
+            )
+        except CircuitOpenError:
+            # The breaker flipped between is_open() and call() — either
+            # a probe is in flight or a concurrent failure opened it.
+            return await self._fallback_check(
+                key=key, capacity=capacity, refill_rate=refill_rate, now=now
             )
         except Exception as exc:
-            # Any Redis exception degrades rather than failing the
-            # request; the auth layer is what decides whether the
-            # caller is allowed, not the rate limiter.
+            # A genuine failure (ConnectionError, TimeoutError, ...) —
+            # the breaker has already recorded it. Any other exception
+            # that reaches here is a caller bug; either way the request
+            # must not fail because the rate limiter is degraded.
             from recsys.monitoring.metrics import RATE_LIMIT_LUA_ERRORS_TOTAL
 
             RATE_LIMIT_LUA_ERRORS_TOTAL.labels(type=type(exc).__name__).inc()
-            self._enter_cooldown(exc)
             return await self._fallback_check(
-                key=key,
-                capacity=capacity,
-                refill_rate=refill_rate,
-                now=now,
+                key=key, capacity=capacity, refill_rate=refill_rate, now=now
             )
 
     # ------------------------------------------------------------------ #
@@ -224,28 +214,6 @@ class TokenBucketLimiter:
         """Bucket size in tokens: the limit's per-second rate times the
         configured burst window (``bucket_seconds``)."""
         return max(1.0, (limit_per_minute / 60.0) * self._bucket_seconds)
-
-    def _enter_cooldown(self, exc: BaseException) -> None:
-        """Start (or extend) the cooldown window from *now*.
-
-        The window is anchored to the last failure, not to every
-        request: a Redis that stays broken is not re-probed per
-        request. The log line fires on the first entry into a cooldown,
-        not on each subsequent extension, so a long outage does not
-        flood the log.
-        """
-        now = time.time()
-        entering = now >= self._cooldown_until
-        self._cooldown_until = now + self._cooldown_seconds
-        if entering or not self._cooldown_logged:
-            log.warning(
-                "ratelimit.degraded",
-                reason="redis_unavailable",
-                error_type=type(exc).__name__,
-                cooldown_seconds=self._cooldown_seconds,
-                instance_count=self._instance_count,
-            )
-            self._cooldown_logged = True
 
     async def _redis_check(
         self,
@@ -270,19 +238,10 @@ class TokenBucketLimiter:
             keys=[f"rate_limit:{key}"],
             args=[capacity, refill_rate, now, 1.0],
         )
-        allowed = bool(result[0])
-        remaining = int(result[1])
-        retry_after = int(result[2])
-
-        if self._cooldown_logged:
-            log.info("ratelimit.recovered")
-            self._cooldown_logged = False
-            self._cooldown_until = 0.0
-
         return RateLimitDecision(
-            allowed=allowed,
-            remaining=remaining,
-            retry_after_seconds=retry_after,
+            allowed=bool(result[0]),
+            remaining=int(result[1]),
+            retry_after_seconds=int(result[2]),
             degraded=False,
         )
 
