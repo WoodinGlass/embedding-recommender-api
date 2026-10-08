@@ -6,15 +6,19 @@ that requests it is rejected at construction here.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 from recsys.retrieval.rerank import (
+    MMR_STATUS_VALUES,
     NEUTRAL_NORM,
     Candidate,
     RerankConfig,
     RerankError,
     WeightedBlendReranker,
     minmax_norm,
+    mmr_status,
     rank_norm,
     recency_decay,
 )
@@ -73,9 +77,10 @@ def test_mmr_lambda_out_of_range_rejected() -> None:
         _cfg(mmr_lambda=1.5)
 
 
-def test_enable_mmr_true_raises_not_implemented() -> None:
-    with pytest.raises(NotImplementedError, match="MMR"):
-        WeightedBlendReranker(_cfg(enable_mmr=True))
+def test_enable_mmr_true_constructs_ok() -> None:
+    # Construction no longer rejects enable_mmr=True; the step is
+    # implemented in M3.4.4b.
+    WeightedBlendReranker(_cfg(enable_mmr=True))
 
 
 # ---------------------------------------------------------------- #
@@ -199,3 +204,109 @@ def test_rerank_error_carries_step() -> None:
     err = RerankError(step="blend", cause=RuntimeError("x"))
     assert err.step == "blend"
     assert isinstance(err.cause, RuntimeError)
+
+
+# ---------------------------------------------------------------- #
+# MMR (M3.4.4b)
+# ---------------------------------------------------------------- #
+def _vec(x: float, y: float) -> NDArray[np.float32]:
+    v = np.array([x, y], dtype=np.float32)
+    norm = float(np.linalg.norm(v))
+    return v / norm
+
+
+def _c_with_vec(
+    item_id: str,
+    *,
+    similarity: float,
+    popularity: float = 0.0,
+    age_days: float = 0.0,
+    vector: NDArray[np.float32] | None = None,
+) -> Candidate:
+    return Candidate(
+        item_id=item_id,
+        similarity=similarity,
+        popularity=popularity,
+        age_days=age_days,
+        vector=vector,
+    )
+
+
+def test_mmr_status_values_are_complete() -> None:
+    assert {
+        "applied",
+        "disabled",
+        "k_below_min",
+        "no_vectors",
+        "no_candidates",
+    } == MMR_STATUS_VALUES
+
+
+def test_mmr_status_disabled_when_config_off() -> None:
+    cands = [_c_with_vec("i_1", similarity=0.5, vector=_vec(1.0, 0.0))]
+    assert mmr_status(candidates=cands, k=10, config=_cfg(enable_mmr=False)) == "disabled"
+
+
+def test_mmr_status_no_candidates() -> None:
+    assert mmr_status(candidates=[], k=10, config=_cfg(enable_mmr=True)) == "no_candidates"
+
+
+def test_mmr_status_k_below_min() -> None:
+    cands = [_c_with_vec("i_1", similarity=0.5, vector=_vec(1.0, 0.0))]
+    status = mmr_status(candidates=cands, k=5, config=_cfg(enable_mmr=True, mmr_min_k=10))
+    assert status == "k_below_min"
+
+
+def test_mmr_status_no_vectors() -> None:
+    cands = [
+        _c_with_vec("i_1", similarity=0.5, vector=_vec(1.0, 0.0)),
+        _c_with_vec("i_2", similarity=0.5, vector=None),
+    ]
+    status = mmr_status(candidates=cands, k=10, config=_cfg(enable_mmr=True))
+    assert status == "no_vectors"
+
+
+def test_mmr_status_applied() -> None:
+    cands = [
+        _c_with_vec("i_1", similarity=0.9, vector=_vec(1.0, 0.0)),
+        _c_with_vec("i_2", similarity=0.5, vector=_vec(0.0, 1.0)),
+    ]
+    status = mmr_status(candidates=cands, k=10, config=_cfg(enable_mmr=True))
+    assert status == "applied"
+
+
+def test_mmr_diversifies_near_duplicates() -> None:
+    near_a = _vec(1.0, 0.0)
+    near_b = _vec(0.999, 0.01)
+    distinct = _vec(0.0, 1.0)
+    cands = [
+        _c_with_vec("i_a", similarity=0.99, popularity=1.0, vector=near_a),
+        _c_with_vec("i_b", similarity=0.98, popularity=1.0, vector=near_b),
+        _c_with_vec("i_c", similarity=0.5, popularity=1.0, vector=distinct),
+    ]
+    cfg = _cfg(enable_mmr=True, mmr_min_k=1, mmr_window=10, mmr_lambda=0.5)
+    out = WeightedBlendReranker(cfg).rerank(candidates=cands, k=3)
+    assert out[0][0] == "i_a"
+    assert out[1][0] == "i_c"
+
+
+def test_mmr_with_lambda_one_returns_blend_order() -> None:
+    cands = [
+        _c_with_vec("i_a", similarity=0.99, popularity=1.0, vector=_vec(1.0, 0.0)),
+        _c_with_vec("i_b", similarity=0.98, popularity=1.0, vector=_vec(0.999, 0.01)),
+        _c_with_vec("i_c", similarity=0.5, popularity=1.0, vector=_vec(0.0, 1.0)),
+    ]
+    cfg = _cfg(enable_mmr=True, mmr_min_k=1, mmr_window=10, mmr_lambda=1.0)
+    out = WeightedBlendReranker(cfg).rerank(candidates=cands, k=3)
+    assert [iid for iid, _ in out] == ["i_a", "i_b", "i_c"]
+
+
+def test_mmr_with_enable_false_is_identical_to_blend_only() -> None:
+    cands = [
+        _c_with_vec("i_a", similarity=0.99, popularity=1.0, vector=_vec(1.0, 0.0)),
+        _c_with_vec("i_b", similarity=0.98, popularity=1.0, vector=_vec(0.999, 0.01)),
+        _c_with_vec("i_c", similarity=0.5, popularity=1.0, vector=_vec(0.0, 1.0)),
+    ]
+    cfg_off = _cfg(enable_mmr=False)
+    out = WeightedBlendReranker(cfg_off).rerank(candidates=cands, k=3)
+    assert [iid for iid, _ in out] == ["i_a", "i_b", "i_c"]

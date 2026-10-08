@@ -302,13 +302,14 @@ class RerankError(RuntimeError):
 
 
 class WeightedBlendReranker:
-    """Normalize, blend, and (from M3.4.4b) diversify.
+    """Normalize, blend, and (when enabled) diversify with MMR.
 
-    This implementation runs the first two steps of ADR-0016 § Decision
-    and defers MMR. A config with ``enable_mmr=True`` is rejected at
-    construction with ``NotImplementedError`` so an arm that expects MMR
-    cannot silently run without it: the next commit fills the step and
-    the raise is removed then.
+    Runs the three steps of ADR-0016 § Decision. MMR is applied to the
+    top ``mmr_window`` of the blended list and only when the config
+    enables it, ``k >= mmr_min_k``, and every candidate carries an
+    L2-normalized vector. The caller uses :func:`mmr_status` to decide
+    which metric to emit; the re-ranker uses the same function
+    internally, so the policy has one home.
 
     **The re-ranker is pure.** It reads no clock, opens no connection,
     and consults no process-wide state. Two consequences:
@@ -331,10 +332,6 @@ class WeightedBlendReranker:
     name: str = "weighted_blend"
 
     def __init__(self, config: RerankConfig) -> None:
-        if config.enable_mmr:
-            raise NotImplementedError(
-                "MMR lands in the next commit; construct with enable_mmr=False"
-            )
         self._config = config
 
     def rerank(
@@ -394,11 +391,159 @@ class WeightedBlendReranker:
 
         # (score DESC, item_id ASC); the tie-break is a total order.
         scored.sort(key=lambda pair: (-pair[1], pair[0]))
-        return scored[:k]
+
+        # MMR is applied only when the config enables it and the window
+        # has vectors for every candidate. `mmr_status` is the single
+        # place that decision is made; the caller imports the same
+        # function to decide which metric to emit.
+        status = mmr_status(candidates=candidates, k=k, config=self._config)
+        if status != "applied":
+            return scored[:k]
+
+        vectors: dict[str, NDArray[np.float32]] = {}
+        for c in candidates:
+            if c.vector is None:
+                # Unreachable: mmr_status returned "applied" only after
+                # checking every candidate has a vector. The guard keeps
+                # mypy from widening the type.
+                raise RerankError(
+                    step="mmr",
+                    cause=RuntimeError("vector missing after mmr_status==applied"),
+                )
+            vectors[c.item_id] = c.vector
+
+        try:
+            return _mmr_select(
+                scored=scored,
+                vectors=vectors,
+                k=k,
+                mmr_lambda=self._config.mmr_lambda,
+                mmr_window=self._config.mmr_window,
+            )
+        except RerankError:
+            raise
+        except Exception as exc:
+            raise RerankError(step="mmr", cause=exc) from exc
+
+
+# ---------------------------------------------------------------------- #
+# MMR (ADR-0016 § Step 3)
+# ---------------------------------------------------------------------- #
+#: The five values ``mmr_status`` can return. ``applied`` is the only
+#: one that runs MMR; every other value is a reason the step was
+#: skipped, and the caller can pass it directly to
+#: ``recsys_rerank_skipped_total{reason=...}``.
+MMR_STATUS_VALUES: frozenset[str] = frozenset(
+    {"applied", "disabled", "k_below_min", "no_vectors", "no_candidates"}
+)
+
+
+def mmr_status(
+    *,
+    candidates: list[Candidate],
+    k: int,
+    config: RerankConfig,
+) -> str:
+    """Return whether MMR will run, and why not when it will not.
+
+    One of: ``applied`` / ``disabled`` / ``k_below_min`` /
+    ``no_vectors`` / ``no_candidates``.
+
+    The decision is a pure function of the arguments; both the
+    re-ranker (to decide whether to run the step) and the caller (to
+    decide which metric to emit) call it. A caller that reached a
+    different conclusion would be duplicating a policy that has one
+    home.
+
+    ``no_vectors`` is returned when any candidate lacks a vector, not
+    only when all of them do. MMR compares every candidate against the
+    selected set, so a single candidate without a vector makes the step
+    undefined for the window; skipping is the conservative choice and
+    matches the ADR's "the retrieval layer does not expose vectors"
+    wording.
+    """
+    if not config.enable_mmr:
+        return "disabled"
+    if not candidates:
+        return "no_candidates"
+    if k < config.mmr_min_k:
+        return "k_below_min"
+    if any(c.vector is None for c in candidates):
+        return "no_vectors"
+    return "applied"
+
+
+def _cosine(a: NDArray[np.float32], b: NDArray[np.float32]) -> float:
+    """Cosine of two vectors that are already L2-normalized.
+
+    The ``Candidate`` docstring requires vectors to be L2-normalized, so
+    cosine is the dot product. Normalizing here would be a second place
+    to compute the same value; a caller that passes a non-normalized
+    vector is a bug the tests catch, not a case to paper over.
+    """
+    return float(np.dot(a, b))
+
+
+def _mmr_select(
+    *,
+    scored: list[tuple[str, float]],
+    vectors: dict[str, NDArray[np.float32]],
+    k: int,
+    mmr_lambda: float,
+    mmr_window: int,
+) -> list[tuple[str, float]]:
+    """Maximal Marginal Relevance selection (ADR-0016 § Step 3).
+
+    ``scored`` is the blended list, already sorted by
+    ``(score DESC, item_id ASC)``. The first ``mmr_window`` items are
+    the selection pool; the rest keep their blended order and are
+    appended after the selected items if the pool is exhausted before
+    ``k``.
+
+    At each step, pick the candidate that maximizes::
+
+        mmr(c) = lambda * blended(c) - (1 - lambda) * max_similarity(c, selected)
+
+    The first pick has an empty ``selected`` set, so ``max_similarity``
+    is ``0.0`` and the first pick is the top blended candidate. Ties in
+    ``mmr`` are broken by ``item_id`` ascending, matching the total
+    order the rest of the re-ranker uses.
+    """
+    window = scored[:mmr_window]
+    tail = scored[mmr_window:]
+
+    selected: list[tuple[str, float]] = []
+    selected_vecs: list[NDArray[np.float32]] = []
+    remaining = list(window)
+
+    while remaining and len(selected) < k:
+        best_idx = 0
+        best_key: tuple[float, str] | None = None
+        for i, (iid, blend) in enumerate(remaining):
+            vec = vectors[iid]
+            max_sim = max(_cosine(vec, sv) for sv in selected_vecs) if selected_vecs else 0.0
+            mmr = mmr_lambda * blend - (1.0 - mmr_lambda) * max_sim
+            # Ascending key: most negative mmr first (max mmr), then min iid.
+            key = (-mmr, iid)
+            if best_key is None or key < best_key:
+                best_key = key
+                best_idx = i
+        chosen = remaining.pop(best_idx)
+        selected.append(chosen)
+        selected_vecs.append(vectors[chosen[0]])
+
+    if len(selected) < k:
+        for item in tail:
+            if len(selected) >= k:
+                break
+            selected.append(item)
+
+    return selected[:k]
 
 
 __all__ = [
     "MINMAX_EPS",
+    "MMR_STATUS_VALUES",
     "NEUTRAL_NORM",
     "Candidate",
     "RerankConfig",
@@ -406,6 +551,7 @@ __all__ = [
     "Reranker",
     "WeightedBlendReranker",
     "minmax_norm",
+    "mmr_status",
     "rank_norm",
     "recency_decay",
 ]
