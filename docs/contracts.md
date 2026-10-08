@@ -665,7 +665,7 @@ evaluation) and the rules for which value belongs where are in
 | `LOG_FORMAT` | enum | `json`, `console` | `json` |
 | `METRICS_ENABLED` | bool | `true`, `false` | `true` |
 | **Auth** (ADR-0013) | | | |
-| `API_KEYS` | comma-list of hashes | non-empty in prod | `dev-key-1` |
+| `API_KEYS` | semicolon-list of hashes | non-empty in prod | `dev-key-1` |
 | `API_KEYS_ADMIN` | comma-list of hashes | empty allowed | empty |
 | `JWT_SECRET` | string | ≥ 32 chars, not the sentinel, in prod | sentinel |
 | `JWT_ALGORITHM` | enum | `HS256`, `RS256` | `HS256` |
