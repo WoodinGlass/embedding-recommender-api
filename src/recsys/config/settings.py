@@ -80,9 +80,27 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------------ #
     # rate limiting (ADR-0014)
+    #
+    # Two-tier limiting: an IP bucket that is always consulted, and a
+    # credential bucket consulted when a credential is present. The IP
+    # limit is intentionally higher: a single IP can be a NAT serving
+    # many users, and the IP bucket exists to bound anonymous or
+    # credential-rotating traffic, not to be the primary limit.
     # ------------------------------------------------------------------ #
     rate_limit_per_minute: int = Field(default=600, ge=1)
+    rate_limit_ip_per_minute: int = Field(default=5000, ge=1)
+    #: Burst window for the token bucket. The bucket capacity is
+    #: ``rate * (bucket_seconds / 60)``; 60 s means "a full minute of
+    #: tokens may burst at once". See ADR-0014.
+    rate_limit_bucket_seconds: float = Field(default=60.0, gt=0)
     instance_count: int = Field(default=1, ge=1)
+    # Number of trusted reverse proxies between the client and the API.
+    # 0 means the direct peer is the client (no proxy headers trusted).
+    # 1 means one trusted proxy (X-Forwarded-For's last entry is the
+    # client). Values above 1 follow the same rule for the Nth entry
+    # from the right. Never trust a header supplied by an untrusted
+    # peer; see ADR-0014.
+    trusted_proxy_count: int = Field(default=0, ge=0, le=10)
 
     # ------------------------------------------------------------------ #
     # circuit breakers (ADR-0015)
@@ -124,6 +142,7 @@ class Settings(BaseSettings):
     # config pollers (ADR-0022)
     # ------------------------------------------------------------------ #
     hot_config_poll_seconds: int = Field(default=5, ge=1)
+    hot_config_path: str = "config/hot.yaml"
     active_index_poll_seconds: int = Field(default=10, ge=1)
 
     # ------------------------------------------------------------------ #

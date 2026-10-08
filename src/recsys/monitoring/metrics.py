@@ -89,3 +89,25 @@ RATE_LIMIT_DEGRADED = Gauge(
     "1 when the shared Redis rate limiter is unavailable.",
     registry=REGISTRY,
 )
+
+RATE_LIMIT_HITS = Counter(
+    "recsys_rate_limit_hits_total",
+    "Rate-limit decisions by class and result.",
+    labelnames=("class_name", "result"),  # allowed | limited
+    registry=REGISTRY,
+)
+
+RATE_LIMIT_REMAINING = Histogram(
+    "recsys_rate_limit_remaining",
+    "Tokens remaining at decision time, by class.",
+    labelnames=("class_name",),
+    buckets=(0, 1, 5, 10, 25, 50, 100, 250, 500, 1000, 5000),
+    registry=REGISTRY,
+)
+
+RATE_LIMIT_LUA_ERRORS_TOTAL = Counter(
+    "recsys_rate_limit_lua_errors_total",
+    "Rate-limit Lua or Redis failures, by exception type.",
+    labelnames=("type",),
+    registry=REGISTRY,
+)

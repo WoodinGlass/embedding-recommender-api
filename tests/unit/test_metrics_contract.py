@@ -30,6 +30,9 @@ def test_contracts_file_exists() -> None:
         "recsys_active_index_info",
         "recsys_experiment_exposures_total",
         "recsys_rate_limit_degraded",
+        "recsys_rate_limit_lua_errors_total",
+        "recsys_rate_limit_remaining",
+        "recsys_rate_limit_hits_total",
     ],
 )
 def test_metric_name_documented(metric_name: str) -> None:
@@ -44,3 +47,6 @@ def test_metric_objects_exposed() -> None:
     assert metrics.REQUESTS_TOTAL is not None
     assert metrics.ACTIVE_INDEX_INFO is not None
     assert metrics.RATE_LIMIT_DEGRADED is not None
+    assert metrics.RATE_LIMIT_HITS is not None
+    assert metrics.RATE_LIMIT_REMAINING is not None
+    assert metrics.RATE_LIMIT_LUA_ERRORS_TOTAL is not None

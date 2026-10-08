@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Rate limiting (M3.2, ADR-0014): a token bucket in Redis via Lua,
+  two tiers (IP + credential) with a per-instance fallback when Redis
+  is unreachable, trusted-proxy parsing of `X-Forwarded-For`, a
+  `RateLimitMiddleware` with a path allowlist (`/healthz`, `/livez`,
+  `/readyz`, `/metrics`, `/docs`, `/redoc`, `/openapi.json`), and a
+  `429` response carrying `Retry-After`, `X-RateLimit-Limit`,
+  `X-RateLimit-Remaining`, and `X-RateLimit-Reset`.
+- `src/recsys/config/hot.py`: reloadable hot config store (ADR-0022).
+  Loaded at startup, re-read when the file's mtime changes, validated
+  against a schema version, and rejecting any field whose name looks
+  like a secret. A failed reload keeps the previous value and logs
+  the reason; the process does not crash. In prod a missing file is a
+  startup failure; outside prod the built-in default is used.
+- `Settings.hot_config_path` and `Settings.rate_limit_bucket_seconds`.
+- Prometheus metrics `recsys_rate_limit_remaining` (histogram) and
+  `recsys_rate_limit_lua_errors_total` (counter), completing the four
+  metrics the rate limit contract declared in M3.0.
 - Twelve ADRs for the production API:
   `docs/adr/0013-authentication-strategy.md` through
   `docs/adr/0024-slo-and-error-budget.md`. They cover auth (API key +

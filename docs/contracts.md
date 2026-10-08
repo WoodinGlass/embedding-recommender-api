@@ -570,7 +570,7 @@ Every non-2xx response uses this shape. No exceptions.
 | 403 | `forbidden` | Valid credential, insufficient scope |
 | 404 | `not_found` | Resource does not exist |
 | 422 | `validation_error` | Pydantic validation failure |
-| 429 | `rate_limited` | Per-key limit hit; `Retry-After` header set |
+| 429 | `rate_limited` | Per-key limit hit; `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` headers set |
 | 500 | `internal_error` | Unhandled; never leak stack traces |
 | 503 | `unavailable` | Both ANN retrieval and fallback failed |
 
@@ -672,7 +672,9 @@ evaluation) and the rules for which value belongs where are in
 | `JWT_MAX_AGE_SECONDS` | int | `> 0` | `86400` |
 | **Rate limit** (ADR-0014) | | | |
 | `RATE_LIMIT_PER_MINUTE` | int | `>= 1` | `600` |
+| `RATE_LIMIT_IP_PER_MINUTE` | int | `>= 1` | `5000` |
 | `INSTANCE_COUNT` | int | `>= 1` | `1` |
+| `TRUSTED_PROXY_COUNT` | int | `0..10` | `0` |
 | **Breaker** (ADR-0015) | | | |
 | `REDIS_BREAKER_FAILURE_THRESHOLD` | int | `>= 1` | `5` |
 | `REDIS_BREAKER_OPEN_SECONDS` | float | `> 0` | `5` |
@@ -802,8 +804,8 @@ not listed here is a contract violation caught by
 | `recsys_rerank_duration_seconds` | histogram | `arm` | Time spent in the re-ranker, by experiment arm (ADR-0016) |
 | `recsys_rerank_failures_total` | counter | `step`, `type` | `step` ∈ `normalize`/`blend`/`mmr` (ADR-0016) |
 | `recsys_rerank_skipped_total` | counter | `reason` | `reason` ∈ `no_vectors`/`k_below_threshold` (ADR-0016) |
-| `recsys_rate_limit_hits_total` | counter | `class`, `result` | `result` ∈ `allowed`/`limited` (ADR-0014) |
-| `recsys_rate_limit_remaining` | histogram | `class` | Tokens left at decision time (ADR-0014) |
+| `recsys_rate_limit_hits_total` | counter | `class_name`, `result` | `result` ∈ `allowed`/`limited` (ADR-0014) |
+| `recsys_rate_limit_remaining` | histogram | `class_name` | Tokens left at decision time (ADR-0014) |
 | `recsys_rate_limit_degraded` | gauge | — | `1` when the per-instance fallback limiter is active (ADR-0014) |
 | `recsys_rate_limit_lua_errors_total` | counter | `type` | Lua script failures by category (ADR-0014) |
 | `recsys_circuit_breaker_state` | gauge | `name` | `name` ∈ `redis`/`postgres`; `0` closed, `1` half-open, `2` open (ADR-0015) |
