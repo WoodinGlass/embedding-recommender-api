@@ -49,6 +49,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class ExperimentRef(BaseModel):
     """Identifies the experiment arm a user was actually served."""
+
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=64)
@@ -61,6 +62,7 @@ class EventEnvelope(BaseModel):
     event log table and the offline experiment analyzer. Add fields only
     via a new ADR; do not repurpose existing ones.
     """
+
     model_config = ConfigDict(extra="forbid")
 
     # Identity & idempotency
@@ -70,7 +72,8 @@ class EventEnvelope(BaseModel):
             "a duplicate is counted, not rejected. If omitted, the server "
             "generates sha256(f'{request_id}:{index}') and returns it."
         ),
-        min_length=8, max_length=64,
+        min_length=8,
+        max_length=64,
     )
     event_ts: datetime = Field(
         description=(
@@ -82,7 +85,8 @@ class EventEnvelope(BaseModel):
     # Core fields
     event_type: Literal["impression", "click", "conversion"]
     user_id: str = Field(
-        min_length=1, max_length=128,
+        min_length=1,
+        max_length=128,
         description=(
             "Raw user id. The server HMAC-SHA256 hashes it with a versioned "
             "salt before storage; the raw value is discarded after the "
@@ -97,7 +101,8 @@ class EventEnvelope(BaseModel):
 
     # Context (free-form but typed; no PII)
     position: int | None = Field(
-        default=None, ge=1,
+        default=None,
+        ge=1,
         description="1-based rank of item_id in the served list, if applicable.",
     )
     value: float | None = Field(
@@ -108,6 +113,7 @@ class EventEnvelope(BaseModel):
 
 class EventBatch(BaseModel):
     """The `POST /v1/events` request body. One to one hundred events."""
+
     model_config = ConfigDict(extra="forbid")
 
     events: Annotated[list[EventEnvelope], Field(min_length=1, max_length=100)]
@@ -115,6 +121,7 @@ class EventBatch(BaseModel):
 
 class EventAck(BaseModel):
     """The `202 Accepted` response body."""
+
     model_config = ConfigDict(extra="forbid")
 
     accepted: int = Field(ge=0)

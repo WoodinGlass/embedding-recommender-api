@@ -111,3 +111,16 @@ RATE_LIMIT_LUA_ERRORS_TOTAL = Counter(
     labelnames=("type",),
     registry=REGISTRY,
 )
+
+CACHE_NEGATIVE_HITS = Counter(
+    "recsys_cache_negative_hits_total",
+    'Hits on a negative ("no such item") cache entry.',
+    registry=REGISTRY,
+)
+
+CACHE_WRITE_ERRORS_TOTAL = Counter(
+    "recsys_cache_write_errors_total",
+    "Cache writes that failed, by bounded exception type.",
+    labelnames=("type",),
+    registry=REGISTRY,
+)
