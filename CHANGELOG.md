@@ -25,6 +25,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prometheus metrics `recsys_rate_limit_remaining` (histogram) and
   `recsys_rate_limit_lua_errors_total` (counter), completing the four
   metrics the rate limit contract declared in M3.0.
+- Cache and circuit breaker (M3.3, ADR-0015): `src/recsys/cache/`
+  with `keys.py` (BLAKE2b-128 key over a canonical payload;
+  user_id deliberately excluded), `ttl.py` (jittered TTL in
+  [0.9, 1.1) plus the `b"\x00negative"` sentinel), and `store.py`
+  (cache-aside: hit, miss, negative, bypass, error; a failed read
+  is a miss, never a request failure). `src/recsys/resilience/`
+  with `breaker.py` (one breaker per dependency, consecutive
+  failures, single HALF_OPEN probe, exponential backoff; failure
+  classification counts connection and timeout errors only) and
+  `metrics.py` (the transition callback that drives the Prometheus
+  gauge and counters). The limiter now consumes the same shared
+  breaker; its bespoke cooldown is gone (M3.2 K4).
+- Prometheus metrics `recsys_cache_negative_hits_total`,
+  `recsys_cache_write_errors_total`, `recsys_circuit_breaker_state`,
+  `recsys_circuit_breaker_state_changes_total`, and
+  `recsys_circuit_breaker_trips_total`, completing the cache and
+  breaker observability surface declared in `docs/contracts.md` § 4.1.
+- `Settings.cache_socket_timeout_seconds` (default 0.1 s); the
+  timeout is applied by redis-py (`socket_timeout`), not by
+  `asyncio.wait_for` (ADR-0015 D5).
+- `api/deps.py`: `LimiterDep`, `CacheStoreDep`, `RedisBreakerDep`,
+  and `HotConfigDep`, so a handler can reach the shared instances
+  without importing the app factory.
+- Integration tests `tests/integration/test_breaker.py` and
+  `tests/integration/test_cache.py`: real Redis round trips, a real
+  TTL elapsing, a real socket-timeout burst proving the connection
+  pool recovers, a logic error not opening the shared breaker, and
+  end-to-end breaker recovery. Skipped unless
+  `RECSYS_TEST_REDIS_URL` is set; the module-level `redis` import is
+  guarded by `pytest.importorskip` so a checkout without the
+  `[cache]` extra skips cleanly instead of failing collection.
+- `docs/adr/0015-cache-and-circuit-breaker.md`: amended before the
+  implementation. Cache path changed to `cache/store.py` (a handler
+  helper, not a Starlette middleware: the key includes the parsed
+  body); breaker path changed to `resilience/breaker.py`;
+  failure-classification rule (K-A), per-instance state (K-B), and
+  the metric cardinality budget (K-C) written down explicitly.
 - Twelve ADRs for the production API:
   `docs/adr/0013-authentication-strategy.md` through
   `docs/adr/0024-slo-and-error-budget.md`. They cover auth (API key +
@@ -243,6 +280,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/eval.py`: `_env_commit` no longer returns an empty string when
   `GITHUB_SHA` is present but empty, which silently disabled the gate's
   commit check. (M2.5)
+- `src/recsys/resilience/breaker.py`: `is_open()` now applies the
+  OPEN timer instead of reporting the stored state. A caller that
+  fast-paths on `is_open()` (the cache and the limiter both do)
+  saw the breaker as open forever after a trip, never entered
+  `call()`, and so never sent the HALF_OPEN probe; a recovered
+  dependency stayed locked out until the process restarted. The
+  integration test `test_threshold_failures_then_recovery` caught
+  it. A unit test with a fake clock now pins the behavior. (M3.3)
 
 
 ### Security
