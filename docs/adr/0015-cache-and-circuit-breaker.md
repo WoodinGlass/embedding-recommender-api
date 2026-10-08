@@ -39,6 +39,17 @@ no cache invalidation on update. The reason is that the cache is keyed by
 entries expire naturally (TTL) without an invalidation message. There is
 no invalidation logic to get wrong.
 
+The cache is a **handler helper**, not a Starlette middleware. Middleware
+runs before routing and cannot see the parsed request body; the cache key
+includes `k`, the filter values, and the seed item ids, all of which are
+part of the body. A cache middleware would have to read the body, which
+means consuming and re-injecting the request stream on every request — a
+cost paid by every request to serve a small fraction. The handler calls
+`CacheStore.get(...)` and `CacheStore.set(...)` explicitly instead. The
+trade-off is that a new handler must remember to call the store; the
+counterweight is that the cache is not silently applied to endpoints it
+was not designed for.
+
 **Key:**
 
 ```
@@ -123,6 +134,34 @@ site would let the cache breaker stay closed while the limiter breaker is
 open, which is one Redis that is up for one path and down for the other —
 a state that does not exist. PostgreSQL has its own breaker.
 
+**Failure classification: connection and timeout errors only.** The
+breaker counts only exceptions that mean the dependency did not answer:
+
+- **Counted as failures:** `ConnectionError`, `TimeoutError`,
+  `asyncio.TimeoutError`, `redis.ConnectionError`, `redis.TimeoutError`,
+  `psycopg.OperationalError`, and connection-pool exhaustion errors.
+- **Not counted as failures:** `ValueError`, `TypeError`, `KeyError`,
+  `redis.ResponseError`, `redis.DataError`, `psycopg.ProgrammingError`,
+  and any exception raised by a Redis or PostgreSQL response that arrives
+  intact.
+
+The rule exists because the cache and the limiter share one Redis breaker.
+If a bug in the limiter raised `ValueError`, that bug would open the
+breaker and take the cache down with it — a Redis outage that never
+happened. A failure classification that keys on "the dependency did not
+answer" keeps the breaker's state tied to the dependency's availability
+and not to the caller's correctness.
+
+**Per-instance state, not shared via Redis.** The breaker's counters
+(`failure_count`, `state`, `last_failure_at`) live in the process. A
+shared breaker would have to consult Redis to decide whether Redis is
+down, which is the failure it exists to detect. Per-instance means that
+with N replicas, N × `failure_threshold` requests must fail before every
+replica opens its own breaker; the window is wider than for a single
+instance but each replica still stops paying the timeout on its own. The
+alternative — coordinating via a channel that is itself the dependency —
+is worse.
+
 **State machine:**
 
 ```
@@ -194,6 +233,7 @@ New metrics:
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `recsys_circuit_breaker_state` | gauge | `name` | 0 = closed, 1 = half-open, 2 = open |
+| `recsys_circuit_breaker_state_changes_total` | counter | `name`, `from`, `to` | State transitions, for alerting on flapping |
 | `recsys_circuit_breaker_trips_total` | counter | `name`, `reason` | `reason` ∈ `failures` / `timeouts` |
 | `recsys_cache_requests_total` | counter | `result` | Already in `docs/contracts.md` § 4.1; `result` ∈ `hit` / `miss` / `bypass` / `error` |
 | `recsys_cache_negative_hits_total` | counter | — | Hits on a negative entry, useful for confirming the negative cache is earning its keep |
@@ -203,6 +243,24 @@ New metrics:
 should watch during an incident: a rising bypass rate means Redis is
 being skipped, either because the breaker is open or because the call is
 failing. It should be near zero in normal operation.
+
+**Cardinality budget.** The label values in this section are the entire
+set the project accepts:
+
+| Metric | Allowed labels | Max cardinality |
+|---|---|---|
+| `recsys_circuit_breaker_state` | `name` ∈ {`redis`, `db`} | 2 |
+| `recsys_circuit_breaker_state_changes_total` | `name` ∈ {`redis`, `db`}, `from`/`to` ∈ {`closed`, `half_open`, `open`} | 2 × 9 = 18 |
+| `recsys_circuit_breaker_trips_total` | `name` ∈ {`redis`, `db`}, `reason` ∈ {`failures`, `timeouts`} | 4 |
+| `recsys_cache_requests_total` | `result` ∈ {`hit`, `miss`, `bypass`, `error`} | 4 |
+| `recsys_cache_negative_hits_total` | (none) | 1 |
+| `recsys_cache_write_errors_total` | `type` (Python exception class name, bounded to top 5) | ≤ 5 |
+
+`endpoint`, `user_id`, `item_id`, `request_id`, and any per-request value
+are **forbidden** as labels. A label that varies per request multiplies
+cardinality by the request rate; Prometheus dies of cardinality long
+before it dies of sample volume. Per-request identity belongs in logs,
+traces, or exemplars, not in a metric label.
 
 Log lines:
 
@@ -285,6 +343,15 @@ index, a corrupted value); it is not part of the steady-state path.
   at 100 ms and PostgreSQL at 2 s is a judgment, not a derivation. A
   reviewer who disagrees can change the config; the defaults are
   recorded with their reasoning.
+- **Two Redis clients, one breaker.** The limiter and the cache each
+  hold their own `redis.asyncio.Redis` connection. They share the breaker
+  (correctly — one dependency, one breaker) but not the connection pool.
+  The two clients are built through a single `make_redis_client(cfg)`
+  factory so their `socket_timeout`, `max_connections`, and
+  `decode_responses` cannot drift. A future change consolidates to one
+  shared client on `app.state.redis`; the refactor touches the app
+  factory, `deps.py`, and every test that constructs a client, so it is
+  deferred. The cost today is one extra pool of at most ten connections.
 - **No `SCAN`-based purge is exposed as a CLI in M3.** The namespace
   prefix exists for the operator to use manually. A `make cache-purge`
   target is a future addition; M3 documents the `SCAN` pattern in
@@ -299,7 +366,16 @@ index, a corrupted value); it is not part of the steady-state path.
 - `docs/contracts.md` § 2.1 — the response shape the cache stores
 - `docs/contracts.md` § 4.1 — the cache metric
 - `docs/ops.md` — the `SCAN` purge pattern and the cache-warming runbook
-- `src/recsys/api/middleware/cache.py` — the middleware that consults
-  the breaker and the cache
-- `src/recsys/monitoring/breaker.py` — the breaker implementation
+- `src/recsys/cache/store.py` — the cache-aside store the handler calls
+  after the request body is parsed. It is **not** a Starlette middleware:
+  the cache key includes `k`, filters, and seeds, so the body must already
+  be parsed when the lookup runs. Starlette middleware exists for
+  cross-cutting concerns (auth, rate limit, request context); the cache is
+  not one.
+- `src/recsys/resilience/breaker.py` — the breaker implementation. It
+  lives under `resilience/` (with retry, bulkhead, timeout as future
+  siblings), not under `monitoring/`. `monitoring/` is for observing the
+  system (metrics, logs, traces, health); the breaker changes what the
+  system does under failure. It emits a metric, but a component is not
+  categorized by one of its outputs.
 - `tests/integration/test_cache.py` and `tests/integration/test_breaker.py`
