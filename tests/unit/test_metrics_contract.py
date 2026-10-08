@@ -25,6 +25,9 @@ def test_contracts_file_exists() -> None:
         "recsys_requests_total",
         "recsys_cache_requests_total",
         "recsys_cache_write_errors_total",
+        "recsys_circuit_breaker_trips_total",
+        "recsys_circuit_breaker_state_changes_total",
+        "recsys_circuit_breaker_state",
         "recsys_cache_negative_hits_total",
         "recsys_fallback_total",
         "recsys_errors_total",
@@ -52,5 +55,8 @@ def test_metric_objects_exposed() -> None:
     assert metrics.RATE_LIMIT_HITS is not None
     assert metrics.CACHE_NEGATIVE_HITS is not None
     assert metrics.CACHE_WRITE_ERRORS_TOTAL is not None
+    assert metrics.CIRCUIT_BREAKER_STATE is not None
+    assert metrics.CIRCUIT_BREAKER_STATE_CHANGES_TOTAL is not None
+    assert metrics.CIRCUIT_BREAKER_TRIPS_TOTAL is not None
     assert metrics.RATE_LIMIT_REMAINING is not None
     assert metrics.RATE_LIMIT_LUA_ERRORS_TOTAL is not None

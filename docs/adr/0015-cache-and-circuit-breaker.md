@@ -234,7 +234,7 @@ New metrics:
 |---|---|---|---|
 | `recsys_circuit_breaker_state` | gauge | `name` | 0 = closed, 1 = half-open, 2 = open |
 | `recsys_circuit_breaker_state_changes_total` | counter | `name`, `from`, `to` | State transitions, for alerting on flapping |
-| `recsys_circuit_breaker_trips_total` | counter | `name`, `reason` | `reason` ∈ `failures` / `timeouts` |
+| `recsys_circuit_breaker_trips_total` | counter | `name`, `reason` | `reason` ∈ `threshold` / `probe_failed` — the transition that opened the breaker |
 | `recsys_cache_requests_total` | counter | `result` | Already in `docs/contracts.md` § 4.1; `result` ∈ `hit` / `miss` / `bypass` / `error` |
 | `recsys_cache_negative_hits_total` | counter | — | Hits on a negative entry, useful for confirming the negative cache is earning its keep |
 | `recsys_cache_write_errors_total` | counter | `type` | A read that succeeds and a write that fails is a real gap; this counts it |
@@ -251,7 +251,7 @@ set the project accepts:
 |---|---|---|
 | `recsys_circuit_breaker_state` | `name` ∈ {`redis`, `db`} | 2 |
 | `recsys_circuit_breaker_state_changes_total` | `name` ∈ {`redis`, `db`}, `from`/`to` ∈ {`closed`, `half_open`, `open`} | 2 × 9 = 18 |
-| `recsys_circuit_breaker_trips_total` | `name` ∈ {`redis`, `db`}, `reason` ∈ {`failures`, `timeouts`} | 4 |
+| `recsys_circuit_breaker_trips_total` | `name` ∈ {`redis`, `db`}, `reason` ∈ {`threshold`, `probe_failed`} | 4 |
 | `recsys_cache_requests_total` | `result` ∈ {`hit`, `miss`, `bypass`, `error`} | 4 |
 | `recsys_cache_negative_hits_total` | (none) | 1 |
 | `recsys_cache_write_errors_total` | `type` (Python exception class name, bounded to top 5) | ≤ 5 |

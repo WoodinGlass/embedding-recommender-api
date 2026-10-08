@@ -816,7 +816,8 @@ not listed here is a contract violation caught by
 | `recsys_rate_limit_degraded` | gauge | — | `1` when the per-instance fallback limiter is active (ADR-0014) |
 | `recsys_rate_limit_lua_errors_total` | counter | `type` | Lua script failures by category (ADR-0014) |
 | `recsys_circuit_breaker_state` | gauge | `name` | `name` ∈ `redis`/`postgres`; `0` closed, `1` half-open, `2` open (ADR-0015) |
-| `recsys_circuit_breaker_trips_total` | counter | `name`, `reason` | `reason` ∈ `failures`/`timeouts` (ADR-0015) |
+| `recsys_circuit_breaker_trips_total` | counter | `name`, `reason` | `reason` ∈ `threshold`/`probe_failed` (ADR-0015) |
+| `recsys_circuit_breaker_state_changes_total` | counter | `name`, `from`, `to` | Breaker transitions; `from`/`to` ∈ `closed`/`half_open`/`open` (ADR-0015) |
 | `recsys_experiment_exposures_total` | counter | `experiment`, `variant` | Both from `experiments.yaml`; emitted when a variant is served (ADR-0017) |
 | `recsys_experiment_exposure_errors_total` | counter | `type` | A failed exposure write (ADR-0017) |
 | `recsys_readyz_status` | gauge | `status` | `status` ∈ `ready`/`degraded`/`not_ready` (ADR-0019) |

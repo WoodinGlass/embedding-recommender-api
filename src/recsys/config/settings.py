@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     database_url: str = "postgresql://recsys:recsys@postgres:5432/recsys"
     redis_url: str = "redis://redis:6379/0"
+    #: Per-call timeout for the cache Redis client. Redis at 100 ms
+    #: is a judgment: a call that exceeds it means the cache is not
+    #: helping, so it should be treated as a miss. See ADR-0015.
+    cache_socket_timeout_seconds: float = Field(default=0.1, gt=0)
     cache_ttl_seconds: int = Field(default=300, ge=0, le=86_400)
 
     # ------------------------------------------------------------------ #

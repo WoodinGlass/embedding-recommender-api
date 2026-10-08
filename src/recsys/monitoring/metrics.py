@@ -124,3 +124,30 @@ CACHE_WRITE_ERRORS_TOTAL = Counter(
     labelnames=("type",),
     registry=REGISTRY,
 )
+
+#: State values the gauge reports. Kept as constants so the callback that
+#: sets the gauge and the test that reads it cannot drift.
+BREAKER_CLOSED: int = 0
+BREAKER_HALF_OPEN: int = 1
+BREAKER_OPEN: int = 2
+
+CIRCUIT_BREAKER_STATE = Gauge(
+    "recsys_circuit_breaker_state",
+    "Breaker state: 0=closed, 1=half_open, 2=open.",
+    labelnames=("name",),
+    registry=REGISTRY,
+)
+
+CIRCUIT_BREAKER_STATE_CHANGES_TOTAL = Counter(
+    "recsys_circuit_breaker_state_changes_total",
+    "Breaker state transitions, by name and from/to states.",
+    labelnames=("name", "from", "to"),
+    registry=REGISTRY,
+)
+
+CIRCUIT_BREAKER_TRIPS_TOTAL = Counter(
+    "recsys_circuit_breaker_trips_total",
+    "Times the breaker transitioned to OPEN.",
+    labelnames=("name", "reason"),  # threshold | probe_failed
+    registry=REGISTRY,
+)

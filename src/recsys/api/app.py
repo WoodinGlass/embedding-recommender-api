@@ -15,13 +15,18 @@ from recsys.api.middleware import (
     RequestContextMiddleware,
 )
 from recsys.api.routers import churn, events, health, metrics, recommend
+from recsys.cache import CacheStore
 from recsys.config.enums import AppEnv
 from recsys.config.hot import HotConfigError, HotConfigStore, default_hot_config
 from recsys.config.settings import Settings, get_settings
 from recsys.monitoring.logging import configure_logging, get_logger
 from recsys.monitoring.tracing import configure_tracing
 from recsys.rate_limit import TokenBucketLimiter
-from recsys.resilience import CircuitBreaker
+from recsys.resilience import CircuitBreaker, CircuitState
+from recsys.resilience.metrics import (
+    breaker_transition_callback,
+    set_initial_state,
+)
 
 
 def _build_hot_store(settings: Settings, log: object) -> HotConfigStore:
@@ -54,37 +59,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_tracing(settings)
     log = get_logger(__name__)
 
-    # The limiter and the breaker are built before the middleware stack
-    # because ``add_middleware`` instantiates the middleware immediately.
-    # The breaker is shared with the response cache (ADR-0015): Redis is
-    # one dependency, and one breaker guards it. The lifespan only closes
-    # the Redis connection on shutdown.
+    # The limiter, the breaker, and the cache store are built before the
+    # middleware stack because ``add_middleware`` instantiates the
+    # middleware immediately. The breaker is shared by the limiter and
+    # the cache (ADR-0015): Redis is one dependency, and one breaker
+    # guards it. The lifespan only closes the Redis clients on shutdown.
     #
-    # The breaker's on_transition callback is wired to Prometheus in
-    # M3.3.6; until then the transition events are emitted into the void.
+    # The breaker emits Prometheus metrics through the callback wired in
+    # ``resilience.metrics``; the initial gauge value is set explicitly
+    # so an alert on ``state != 0`` is unambiguous from the first scrape.
     redis_breaker = CircuitBreaker(
         name="redis",
         failure_threshold=settings.redis_breaker_failure_threshold,
         open_seconds=settings.redis_breaker_open_seconds,
         open_max_seconds=settings.redis_breaker_open_max_seconds,
+        on_transition=breaker_transition_callback,
     )
+    set_initial_state("redis", CircuitState.CLOSED)
+
     limiter = TokenBucketLimiter(
         redis_url=settings.redis_url,
         instance_count=settings.instance_count,
         bucket_seconds=settings.rate_limit_bucket_seconds,
         breaker=redis_breaker,
     )
+    cache_store = CacheStore(
+        redis_url=settings.redis_url,
+        breaker=redis_breaker,
+        socket_timeout_seconds=settings.cache_socket_timeout_seconds,
+    )
     hot_store = _build_hot_store(settings, log)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.limiter = limiter
+        app.state.cache = cache_store
         app.state.redis_breaker = redis_breaker
         app.state.hot_config = hot_store
         try:
             yield
         finally:
             await limiter.close()
+            await cache_store.close()
 
     app = FastAPI(
         title="embedding-recommender-api",
