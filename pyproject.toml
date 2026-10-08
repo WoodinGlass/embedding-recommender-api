@@ -129,7 +129,7 @@ service = [
 # ML runtime (torch/sentence-transformers) or the pipelines. CI uses this for
 # the fast gates so a PR does not wait on a ~800 MB download.
 dev-lite = [
-  "embedding-recommender-api[api,observability]",
+  "embedding-recommender-api[api,auth,observability]",
   # tests
   "pytest>=8.3,<9.0",
   "pytest-asyncio>=0.24,<1.0",
@@ -259,6 +259,7 @@ module = [
   "pyarrow.*",
   "jax.*",
   "jaxlib.*",
+  "jwt.*",
 ]
 ignore_missing_imports = true
 # Some transitive dependencies (in our case jax, pulled in by
