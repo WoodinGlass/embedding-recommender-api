@@ -41,3 +41,15 @@ Per `docs/contracts.md` § 6 (Change management):
 | [0010](0010-evaluation-thresholds.md) | Evaluation thresholds — absolute floor, history, and the CI gate | Accepted |
 | [0011](0011-faiss-benchmark-methodology.md) | FAISS benchmark methodology and reproducibility | Accepted |
 | [0012](0012-backend-abstraction.md) | Backend abstraction, `NumpyBackend` for exact kNN, and pgvector in CI only | Accepted |
+| [0013](0013-authentication-strategy.md) | Authentication strategy (API key + JWT) | Accepted |
+| [0014](0014-rate-limiting.md) | Rate limiting (token bucket in Redis, per-credential) | Accepted |
+| [0015](0015-cache-and-circuit-breaker.md) | Response cache and circuit breaker for Redis | Accepted |
+| [0016](0016-reranker-composition.md) | Re-ranker composition | Accepted |
+| [0017](0017-experiment-assignment.md) | Experiment assignment and exposure logging | Accepted |
+| [0018](0018-event-ingestion.md) | Event ingestion | Accepted |
+| [0019](0019-readiness-contract.md) | Readiness and liveness contract | Accepted |
+| [0020](0020-fallback-chain.md) | Fallback chain | Accepted |
+| [0021](0021-observability-contract.md) | Observability contract (metrics, logs, traces) | Accepted |
+| [0022](0022-config-management.md) | Configuration management | Accepted |
+| [0023](0023-deployment-strategy.md) | Deployment strategy | Accepted |
+| [0024](0024-slo-and-error-budget.md) | SLOs, error budget, and what this project does not promise | Accepted |
