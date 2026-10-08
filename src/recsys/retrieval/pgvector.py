@@ -80,6 +80,44 @@ def _parse_extversion(raw: str) -> PgvectorVersion:
     return PgvectorVersion(raw=raw, major=major, minor=minor)
 
 
+def _coerce_vector(raw: Any) -> NDArray[np.float32]:
+    """Coerce a raw ``embedding.vector`` column value to a float32 array.
+
+    The driver's representation depends on how the connection is
+    configured. pgvector ships an adapter (``pgvector.psycopg``) that
+    decodes the column to ``numpy.ndarray`` when registered; without it,
+    psycopg hands back the column's text form, ``"[0.1, 0.2, ...]"``. The
+    evaluation script does not register the adapter because the
+    connection is shared with other callers and the registration is a
+    global side effect. This helper handles all three representations
+    that occur in practice:
+
+    - ``numpy.ndarray`` — the adapter is registered.
+    - ``bytes`` / ``bytearray`` — a driver that returns the wire form
+      undecoded.
+    - ``str`` — the default; a bracketed comma-separated list.
+    - a Python list — a JSON-decoded value from a driver that never
+      sees the pgvector adapter.
+
+    A malformed value raises ``ValueError`` with the underlying reason,
+    which the caller turns into a per-arm error rather than a crash.
+    """
+    if isinstance(raw, np.ndarray):
+        return raw.astype(np.float32, copy=False)
+    if isinstance(raw, (bytes, bytearray)):
+        raw = bytes(raw).decode("ascii")
+    if isinstance(raw, str):
+        s = raw.strip()
+        if s.startswith("[") and s.endswith("]"):
+            s = s[1:-1]
+        if not s:
+            return np.zeros(0, dtype=np.float32)
+        # ``np.fromstring`` is deprecated; a comprehension is explicit
+        # and fast enough for the 384-float payload this handles.
+        return np.array([float(x) for x in s.split(",")], dtype=np.float32)
+    return np.asarray(raw, dtype=np.float32)
+
+
 def _vector_to_literal(vector: NDArray[np.float32]) -> str:
     """Render a float32 vector as the literal pgvector accepts.
 
@@ -298,7 +336,7 @@ class PgvectorBackend:
         result: list[tuple[str, float, NDArray[np.float32]]] = []
         for item_id, distance, raw_vec in rows[:k]:
             similarity = self._clamp_similarity(1.0 - float(distance))
-            vec = np.asarray(raw_vec, dtype=np.float32)
+            vec = _coerce_vector(raw_vec)
             result.append((str(item_id), similarity, vec))
         return result
 
