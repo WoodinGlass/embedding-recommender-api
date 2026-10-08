@@ -437,7 +437,243 @@ environment. Coordinate with § 2.2 (backup before upgrade) and § 4.2
 
 ---
 
-## 8. What is planned but not defined
+## 8. Key rotation
+
+Two secrets rotate on different schedules: the API key set (`API_KEYS`,
+`API_KEYS_ADMIN`) and the JWT signing secret (`JWT_SECRET`). Both use
+the same pattern, and the pattern exists so that in-flight callers are
+not dropped at the moment of the change.
+
+### 8.1 API key rotation
+
+**Two-step rotation:**
+
+1. **Add the new key.** Generate the new key hash (see below), append it
+   to `API_KEYS` (or `API_KEYS_ADMIN`), and deploy. Both the old and the
+   new key now authenticate.
+2. **Wait.** Let the old key drain. The window depends on the caller:
+   a B2B caller that reads the key from a config file at process start
+   needs the window to cover its restart schedule. A week is the default.
+3. **Remove the old key.** Delete the old hash from the config and
+   deploy. Only the new key authenticates.
+
+**Generating the hash.** API keys are stored as Argon2id hashes
+(ADR-0013). The operator generates a random key, hashes it, and stores
+the hash:
+
+```bash
+# Generate a key (32 bytes, base64url-encoded).
+python -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+
+# Hash it for the config.
+python -c "
+from passlib.context import CryptContext
+import sys
+ctx = CryptContext(schemes=['argon2'], deprecated='auto')
+print(ctx.hash(sys.argv[1]))
+" '<the-key-from-above>'
+```
+
+The plaintext key is handed to the caller once, through a channel the
+project does not specify (a secret manager, a phone call, whatever the
+operator uses). It is not written to `.env`, not committed, and not
+logged.
+
+**Verifying the rotation.** Before removing the old key:
+
+```bash
+curl -fsS -H "X-API-Key: $NEW_KEY" http://localhost:8000/v1/recommend \
+    -H 'Content-Type: application/json' \
+    -d '{"user_id":"u_1","seed_item_ids":["i_0001"],"k":1}'
+```
+
+A 200 (or a 4xx from validation, which means the credential passed)
+confirms the new key works. A 401 means the hash is wrong; do not
+proceed to step 3.
+
+### 8.2 JWT secret rotation
+
+**Two-step rotation with `kid`:**
+
+1. **Add the new secret under a new `kid`.** The validator picks the
+   secret by the token's `kid` header. Both secrets are valid during
+   the window.
+2. **Wait for the token TTL.** A token signed by the old secret is
+   valid until its `exp`, which is bounded by `JWT_MAX_AGE_SECONDS`
+   (default 24 hours). The window must cover that. A week is generous.
+3. **Remove the old secret.** Tokens signed by it are now rejected, and
+   their holders must re-authenticate (which a user-facing client does
+   through its normal login flow).
+
+**Single-secret deployments.** A deployment with one secret (no `kid`)
+rotates by deploying the new secret at a time when every valid token
+has expired. For `JWT_MAX_AGE_SECONDS=86400`, that is a 24-hour window
+during which no new tokens are issued under the old secret. The
+single-secret path is a maintenance-window operation; the `kid` path is
+the zero-downtime path.
+
+### 8.3 User id hash salt rotation
+
+`USER_ID_HASH_SALT` is a secret (ADR-0018). Rotating it produces
+different hashes for the same `user_id`, so the salt version must be
+bumped in the same change:
+
+1. Generate a new salt.
+2. Set `USER_ID_HASH_SALT` and increment `USER_ID_HASH_SALT_VERSION`.
+3. Deploy.
+
+The event table now has rows under two salt versions. The M5 analysis
+filters on one version at a time, or joins across them using the
+rotation date. The version is stored per row precisely so this works.
+
+**Do not reuse a salt version number.** The version is an operator-managed
+integer; a rotation that forgets to increment it produces two hashes
+under one label, and the analysis sees a single user as two. The startup
+log prints the version so a mismatch is visible.
+
+## 9. Migrations
+
+Migrations are additive during a rollout and manual when they are not
+(ADR-0023).
+
+### 9.1 The additive-only rule
+
+A rolling update has the old and the new code running at the same time
+for the duration of the rollout. A migration that changes the schema in
+a way the old code does not understand breaks the old instances before
+they are replaced.
+
+- **Additive changes are safe mid-roll.** A nullable column, a new
+  table, a new index.
+- **Destructive changes are not safe mid-roll.** Dropping a column,
+  renaming a column, changing a column's type in a way that loses data,
+  adding `NOT NULL` to an existing column that has rows.
+- **A destructive change is two deploys.** First deploy: add the new
+  shape and write to both. Second deploy, after every instance runs the
+  new code: drop the old shape.
+
+The rule is the migration author's responsibility. `alembic upgrade
+head` runs before the new instances start; the rule is what makes that
+step safe.
+
+### 9.2 Running a migration
+
+```bash
+# Always back up first (section 2).
+pg_dump --format=custom --no-owner --no-privileges \
+    --file=pre-migration-$(date -u +%Y%m%dT%H%M%SZ).dump \
+    "$DATABASE_URL"
+
+# Show what will run, without running it.
+alembic history --verbose
+
+# Apply.
+alembic upgrade head
+```
+
+`alembic upgrade head` is what the CD pipeline runs before starting new
+instances. Running it by hand against production is a maintenance-window
+operation: drain the API, run the migration, start the API.
+
+### 9.3 A migration that is not additive
+
+A destructive change — a column rename with data, a type change that
+loses precision, a table merge — is a manual operation:
+
+1. Take a backup (section 2).
+2. Announce the maintenance window.
+3. Drain the API (scale to zero, or deploy a version that serves 503
+   with a `Retry-After`).
+4. Run the migration.
+5. Verify: `/readyz` returns `ready`, the eval gate passes
+   (`make eval`), and a smoke query returns the expected result.
+6. Restore traffic.
+
+The CD pipeline does not attempt a non-additive migration. The manual
+runbook is the only path, and it is documented so it is not improvised
+under pressure.
+
+### 9.4 Reverting a migration
+
+`alembic downgrade -1` is only safe when the migration was additive and
+the old code is compatible with the reverted schema. For a destructive
+migration, the revert is a restore from the pre-migration backup, which
+is why the backup step is not optional.
+
+A code rollback does not undo a migration. The additive-only rule is
+what makes a code rollback safe against a new schema; if the migration
+was destructive, the rollback requires a restore.
+
+## 10. Postmortem template
+
+A postmortem is written when an incident consumes the error budget
+(ADR-0024 § Error budget policy), and optionally after any incident
+worth recording. It is a text file in `docs/postmortems/`, named
+`YYYY-MM-DD-<short-slug>.md`.
+
+The purpose is learning, not blame. The template below is deliberately
+short; a long template is one nobody fills in.
+
+```markdown
+# <date>: <one-line description>
+
+## What happened
+
+A short narrative of the incident, in the order a reader needs it.
+When did it start, when was it noticed, what did the system do, when
+was it resolved. Five paragraphs is a long postmortem.
+
+## Impact
+
+- Duration: start time → end time (UTC)
+- Users affected: a number or a percentage
+- SLO budget consumed: which SLO, how much
+- Data lost: none / a number / a description
+
+## What we changed (or did not)
+
+The actions taken during the incident. Include the ones that did not
+work, and why they did not work; a postmortem that lists only the
+successful action hides the search.
+
+## Root cause
+
+The mechanism, not the trigger. "The database was slow" is a trigger;
+"the connection pool's size was sized for the development workload and
+the production workload is an order of magnitude larger" is a mechanism.
+
+If the root cause is unknown, say so. A postmortem that invents a cause
+is worse than one that admits the gap.
+
+## What we are changing
+
+A list of follow-up actions, each with an owner and a target date. An
+action without an owner and a date is a wish.
+
+## What we are not changing
+
+The things that look like they should change but will not, and why.
+This section is as important as the previous one: it records the
+decisions that are not made, so a future reader does not re-litigate
+them without the context.
+
+## Timeline (optional)
+
+A timestamped log of the incident. Include for a long or complex
+incident; skip for a short one.
+```
+
+**Where the file lives.** `docs/postmortems/`. The directory starts
+with a `README.md` that names the convention and links to this template.
+A postmortem is committed like any other document; a bug-fix PR that
+follows an incident references it in its description.
+
+**Review is asynchronous.** A postmortem is not a meeting. The
+maintainer writes it, commits it, and moves on. For a future team, the
+review would be a synchronous meeting with the on-call; the format is
+the same, the venue is different.
+
+## 11. What is planned but not defined
 
 The following procedures have no written runbook yet. They are listed so
 that the gap is explicit:
@@ -458,7 +694,7 @@ version (M2), and file an issue.
 
 ---
 
-## 9. References
+## 12. References
 
 - [`runbook.md`](runbook.md) — incident response (alerts, symptoms,
   diagnosis, escalation)

@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Twelve ADRs for the production API:
+  `docs/adr/0013-authentication-strategy.md` through
+  `docs/adr/0024-slo-and-error-budget.md`. They cover auth (API key +
+  JWT, fail-closed), rate limiting (token bucket in Redis), the response
+  cache and one circuit breaker per dependency, re-ranker composition,
+  experiment assignment and exposure logging, event ingestion, the
+  readiness contract, the four-tier fallback chain, the observability
+  contract, configuration management, deployment strategy, and the SLOs
+  with their error budget policy. (M3.0)
+- `docs/production-api.md`: the M3 design doc consolidating the twelve
+  ADRs. Scope, module layout, request lifecycle (with a sequence
+  diagram), auth, rate limit, cache, re-ranker, experiments, events,
+  fallback chain, readiness and observability, config, and an eight-step
+  phased delivery plan. (M3.0)
+- `experiments.yaml`: committed experiment declarations (ADR-0017),
+  read once at API startup and validated. Ships with one stopped
+  example so the loader is exercised and the schema documented. (M3.0)
+- `config/hot.yaml`: the reloadable rate limits, re-ranker weights, and
+  cache TTLs (ADR-0022), polled and validated before a change takes
+  effect. (M3.0)
+- `docs/ops.md` § 8 (key rotation), § 9 (migrations), § 10 (postmortem
+  template). The rotation procedure is the two-step pattern from
+  ADR-0013; the migration rule is additive-only during a rollout
+  (ADR-0023); the postmortem template is what the error-budget policy
+  in ADR-0024 requires. (M3.0)
+- `docs/contracts.md`: § 1.1 rewritten for the batch event envelope
+  with `EventBatch`, `EventAck`, HMAC-SHA256 user id hashing with a
+  versioned salt, a skew window, and a retention policy; § 2.1 extends
+  `meta.source` from three values to five; § 2.6 added for the
+  three-state readiness contract; § 3 rewritten for the five config
+  categories; § 4.1 replaced with the complete metric registry and
+  § 4.5 added with the API log events; § 5 extended with the M3
+  endpoints and the exposure write. (M3.0)
 - `src/recsys/evaluation/`: the offline evaluation harness. `metrics.py`
   (Recall@k, NDCG@k, MRR, ANN fidelity as pure functions), `golden_set.py`
   (loader and validator for `evaluation/golden_set/v1.jsonl`),
@@ -143,20 +176,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `APP_ENV`, `DEVICE`) instead of booleans. (M0.3)
 - `CHANGELOG.md` (this file). (M0.3)
 
-### Changed
-- `README.md`: FAISS HNSW row in the evaluation table filled with the
-  measured values from `docs/faiss-benchmark.json`. M2 is complete. (M2.7)
-- `src/recsys/monitoring/logging.py`: structlog now writes to **stderr**,
-  and the module-level default (applied at import time) matches what
-  `configure_logging` does. This makes CLI scripts safe: their stdout
-  carries the final JSON result and nothing else. (M2.5)
-- `src/recsys/config/settings.py`: default `EMBEDDING_ONNX_PATH` aligned
-  with what `scripts/export_onnx.py` actually writes. (M2.5)
-- `README.md`: evaluation table filled with the first measured values from
-  the CI `evaluation gate` job; M2 milestone moved to Done. (M2.5)
-- `README.md`: relaxed `requires-python` from `>=3.11,<3.12` to `>=3.11`
 
-### Added
 - `scripts/bench_faiss.py` and `scripts/render_benchmark.py`: the FAISS
   HNSW benchmark from ADR-0011. Compares exact kNN (numpy) and FAISS HNSW
   over the same vectors, golden set, and query vectors; writes a JSON
@@ -169,6 +189,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Headline: on 200 items, HNSW is fully connected at every ef_search in
   the grid; ANN fidelity is 1.0000 across the board. On a larger catalog
   the recall/latency trade-off would be visible. (M2.6)
+
+
+### Changed
+- `.env.example`: rewritten for the M3 config contract. Every variable
+  documented in `docs/contracts.md` § 3.1, grouped by subsystem, with
+  the prod-guard rules stated next to the secrets they apply to. (M3.0)
+- `pyproject.toml`: the `[auth]` extra pulls `passlib[argon2]` instead of
+  bcrypt (ADR-0013 chose Argon2id for API keys); a new `[config]` extra
+  carries `pyyaml` for the API startup; the `[service]` meta group
+  includes `[config]`. (M3.0)
+- `README.md`: FAISS HNSW row in the evaluation table filled with the
+  measured values from `docs/faiss-benchmark.json`. M2 is complete. (M2.7)
+- `src/recsys/monitoring/logging.py`: structlog now writes to **stderr**,
+  and the module-level default (applied at import time) matches what
+  `configure_logging` does. This makes CLI scripts safe: their stdout
+  carries the final JSON result and nothing else. (M2.5)
+- `src/recsys/config/settings.py`: default `EMBEDDING_ONNX_PATH` aligned
+  with what `scripts/export_onnx.py` actually writes. (M2.5)
+- `README.md`: evaluation table filled with the first measured values from
+  the CI `evaluation gate` job; M2 milestone moved to Done. (M2.5)
+- `README.md`: relaxed `requires-python` from `>=3.11,<3.12` to `>=3.11` (M0.5)
+
 
 ### Fixed
 - `src/recsys/evaluation/runner.py`: the evaluation runner now excludes
@@ -185,8 +227,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GITHUB_SHA` is present but empty, which silently disabled the gate's
   commit check. (M2.5)
 
+
 ### Security
 - n/a
+
 
 ## Notes
 
