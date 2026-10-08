@@ -246,3 +246,40 @@ def test_zero_k_raises() -> None:
 
     with pytest.raises(EvaluationError, match="k must be positive"):
         _run(k=0)
+
+
+# ---------------------------------------------------------------- #
+# build_report with system_status (M3.4.9d1)
+# ---------------------------------------------------------------- #
+def test_build_report_includes_system_status() -> None:
+    from recsys.evaluation.runner import build_report
+
+    report = build_report(
+        golden_set_version="v1",
+        commit="abc123",
+        created_at="2026-01-01T00:00:00Z",
+        systems={"arm_a": {"ndcg_at_10": 0.9}, "arm_b": {"ndcg_at_10": None}},
+        system_status={
+            "arm_a": {"status": "ok"},
+            "arm_b": {"status": "error", "error_message": "no vectors"},
+        },
+    )
+    assert report["systems"]["arm_a"]["status"] == "ok"
+    assert report["systems"]["arm_b"]["status"] == "error"
+    assert report["systems"]["arm_b"]["error_message"] == "no vectors"
+    # metrics dict is preserved
+    assert report["systems"]["arm_a"]["metrics"]["ndcg_at_10"] == 0.9
+    # None metric preserved as null
+    assert report["systems"]["arm_b"]["metrics"]["ndcg_at_10"] is None
+
+
+def test_build_report_status_optional() -> None:
+    from recsys.evaluation.runner import build_report
+
+    report = build_report(
+        golden_set_version="v1",
+        commit="abc",
+        created_at="2026-01-01T00:00:00Z",
+        systems={"arm_a": {"ndcg_at_10": 0.9}},
+    )
+    assert "status" not in report["systems"]["arm_a"]

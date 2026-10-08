@@ -489,17 +489,33 @@ def build_report(
     commit: str,
     created_at: str,
     systems: Mapping[str, Mapping[str, float | None]],
+    system_status: Mapping[str, Mapping[str, Any]] | None = None,
     per_query: Mapping[str, Sequence[QueryOutcome]] | None = None,
 ) -> dict[str, Any]:
     """Assemble the report document the gate consumes.
 
-    ``systems`` is ``{system_name: {metric_name: value}}``. ``per_query``,
-    when given, is written alongside the aggregate for diagnostics; it is
-    not read by the gate.
+    ``systems`` is ``{system_name: {metric_name: value}}``. A metric value
+    of ``None`` means "this metric does not apply to this system": the
+    gate skips a null metric (see ``evaluate_gate``); it does not skip a
+    metric that is absent from the report. ``ann_recall_vs_exact`` for a
+    rerank arm is the canonical example of a null metric.
+
+    ``system_status``, when given, is
+    ``{system_name: {"status": str, "error_message": str | None, ...}}``
+    and is written next to ``metrics`` under the same key. The gate does
+    not read it; a human (or a dashboard) does. It is the place a rerank
+    arm records that it ran (``ok``), ran with a degraded signal
+    (``degraded``), or could not run (``error``), so a reader can tell
+    "this arm scored low" from "this arm did not run".
+
+    ``per_query``, when given, is written alongside the aggregate for
+    diagnostics; it is not read by the gate.
     """
     systems_doc: dict[str, Any] = {}
     for name, metrics in systems.items():
         entry: dict[str, Any] = {"metrics": dict(metrics)}
+        if system_status is not None and name in system_status:
+            entry.update(dict(system_status[name]))
         if per_query is not None and name in per_query:
             entry["per_query"] = [
                 {

@@ -45,6 +45,7 @@ from typing import Any
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from recsys.config.hot import HotConfigStore  # noqa: E402
 from recsys.evaluation.baselines import (  # noqa: E402
     popularity_baseline,
     random_baseline,
@@ -55,7 +56,9 @@ from recsys.evaluation.golden_set import (  # noqa: E402
 )
 from recsys.evaluation.runner import (  # noqa: E402
     EvaluationError,
+    RerankArmResult,
     build_report,
+    evaluate_rerank_arm,
     write_report,
 )
 from recsys.evaluation.thresholds import (  # noqa: E402
@@ -69,6 +72,14 @@ from recsys.retrieval.build import (  # noqa: E402
 )
 from recsys.retrieval.numpy_backend import NumpyBackend  # noqa: E402
 from recsys.retrieval.pgvector import PgvectorBackend  # noqa: E402
+from recsys.retrieval.providers import (  # noqa: E402
+    FrozenRecencyProvider,
+    PgRecencyProvider,
+    PopularityProvider,
+    RecencyProvider,
+    SyntheticPopularityProvider,
+)
+from recsys.retrieval.rerank import RerankConfig, Reranker, WeightedBlendReranker  # noqa: E402
 
 EXIT_OK = 0
 EXIT_GATE_FAILED = 1
@@ -140,17 +151,19 @@ def _evaluate_vector_system(
     embedding_lookup: Any,
     exact_backend: Any,
     k: int,
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     """Evaluate a search backend and return its aggregate metrics."""
     from recsys.evaluation.runner import evaluate_system
 
-    metrics, _ = evaluate_system(
-        backend=backend,
-        golden_set=golden_set,
-        embedding_lookup=embedding_lookup,
-        k=k,
-        exact_backend=exact_backend,
-        include_per_query=False,
+    metrics: dict[str, float | None] = dict(
+        evaluate_system(
+            backend=backend,
+            golden_set=golden_set,
+            embedding_lookup=embedding_lookup,
+            k=k,
+            exact_backend=exact_backend,
+            include_per_query=False,
+        )[0]
     )
     return metrics
 
@@ -161,7 +174,7 @@ def _evaluate_baseline(
     item_ids: list[str],
     golden_set: Any,
     k: int,
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     """Evaluate a non-vector baseline (random, popularity).
 
     Baselines produce a ranked list per query without a query vector;
@@ -197,7 +210,7 @@ def _evaluate_popularity(
     item_ids: list[str],
     golden_set: Any,
     k: int,
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     """Popularity baseline: same shape as _evaluate_baseline but without
     a query_id (popularity is query-independent)."""
     from recsys.evaluation.metrics import mrr, ndcg_at_k, recall_at_k
@@ -221,6 +234,90 @@ def _evaluate_popularity(
         f"ndcg_at_{k}": _mean(ndcg_values),
         "mrr": _mean(mrr_values),
     }
+
+
+# --------------------------------------------------------------------------- #
+# rerank arms
+# --------------------------------------------------------------------------- #
+def _build_rerank_providers(
+    conn: Any | None,
+) -> tuple[PopularityProvider, RecencyProvider]:
+    """Return the (popularity, recency) providers the arms will use.
+
+    Popularity is always :class:`SyntheticPopularityProvider`, the
+    placeholder the ADR ships until M5 lands an event-based provider.
+    Its value is a hash of the item id, so an evaluation run is
+    deterministic across processes.
+
+    Recency is ``PgRecencyProvider`` when a database is reachable, and a
+    ``FrozenRecencyProvider`` with ``default=0.0`` otherwise. The frozen
+    provider returns the same age for every item; the recency signal is
+    then uniform and does not change the ranking (ADR-0016 § Step 1,
+    degenerate case). The arm still runs and its metrics are still
+    produced; a reader knows recency was neutral because the ages were
+    uniform, not because a provider failed.
+    """
+    popularity = SyntheticPopularityProvider()
+    if conn is not None:
+        recency: RecencyProvider = PgRecencyProvider(conn, timeout_seconds=2.0)
+    else:
+        recency = FrozenRecencyProvider({}, default=0.0)
+    return popularity, recency
+
+
+def _evaluate_rerank_arm_system(
+    *,
+    backend: Any,
+    golden_set: Any,
+    embedding_lookup: Any,
+    exact_backend: Any,
+    k: int,
+    config: RerankConfig,
+    reranker: Reranker,
+    popularity_provider: PopularityProvider,
+    recency_provider: RecencyProvider,
+) -> tuple[dict[str, float | None], dict[str, Any]]:
+    """Evaluate one rerank arm and return ``(aggregate, status_info)``.
+
+    ``status_info`` is written next to ``metrics`` in the report so a
+    reader can tell "this arm scored low" from "this arm did not run".
+    The gate does not read it; the summary table does.
+    """
+    result: RerankArmResult = evaluate_rerank_arm(
+        backend=backend,
+        golden_set=golden_set,
+        embedding_lookup=embedding_lookup,
+        k=k,
+        config=config,
+        reranker=reranker,
+        popularity_provider=popularity_provider,
+        recency_provider=recency_provider,
+        exact_backend=exact_backend,
+        include_per_query=False,
+    )
+    status_info: dict[str, Any] = {
+        "status": result.status,
+        "error_message": result.error_message,
+    }
+    return dict(result.aggregate), status_info
+
+
+def _selected_arms(spec: str) -> set[str]:
+    """Parse ``--arms`` into a set of arm names.
+
+    ``"all"`` (the default) means every rerank arm. Otherwise a
+    comma-separated list. The retrieval-only systems (``random_baseline``,
+    ``popularity_synthetic``, ``exact_knn``, ``pgvector_hnsw``) always
+    run; they are not "arms".
+    """
+    if spec.strip().lower() == "all":
+        return {"blend", "blend_mmr", "exact_knn_blend"}
+    out: set[str] = set()
+    for raw in spec.split(","):
+        name = raw.strip()
+        if name:
+            out.add(name)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -261,6 +358,20 @@ def _make_parser() -> argparse.ArgumentParser:
         help="skip the pgvector system even if a database is reachable",
     )
     p.add_argument(
+        "--arms",
+        default="all",
+        help=(
+            "rerank arms: 'all' (default) or a comma-separated subset of "
+            "blend,blend_mmr,exact_knn_blend. Retrieval-only systems always run."
+        ),
+    )
+    p.add_argument(
+        "--hot-config",
+        type=pathlib.Path,
+        default=REPO_ROOT / "config" / "hot.yaml",
+        help="hot config file; supplies the reranker weights and MMR settings",
+    )
+    p.add_argument(
         "--commit",
         default=None,
         help="commit under test (default: $GITHUB_SHA or `git rev-parse HEAD`)",
@@ -279,10 +390,21 @@ def _make_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _num(value: Any) -> float:
+    """Return ``value`` as a float, or 0.0 when it is None.
+
+    A ``None`` metric is "does not apply" (ADR-0016 § Step 3). The
+    summary shows it as 0.0 for column alignment; the report carries the
+    real value for the gate.
+    """
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
 def _print_metrics_summary(
-    systems: dict[str, dict[str, float]],
+    systems: dict[str, dict[str, float | None]],
     *,
     k: int,
+    system_status: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     """Print a compact table of metrics to stderr.
 
@@ -290,28 +412,41 @@ def _print_metrics_summary(
     download the report artifact to see what the gate compared against.
     Stderr, not stdout: stdout is reserved for the single-line JSON
     events the caller may parse.
+
+    ``ann_pre`` is the pre-rerank ANN fidelity. It equals
+    ``ann_recall_vs_exact`` for a retrieval-only system and is the
+    retrieval stage's number for a rerank arm. ``status`` is the arm's
+    ``ok`` / ``degraded`` / ``error`` state; empty for a retrieval-only
+    system.
     """
     recall_key = f"recall_at_{k}"
     ndcg_key = f"ndcg_at_{k}"
-    headers = ("system", recall_key, ndcg_key, "mrr", "ann_recall_vs_exact")
-    rows: list[tuple[str, str, str, str, str]] = []
+    headers = ("system", recall_key, ndcg_key, "mrr", "ann_pre", "status")
+    rows: list[tuple[str, str, str, str, str, str]] = []
+    status_map = system_status or {}
     for name in sorted(systems):
         m = systems[name]
+        pre = m.get("ann_recall_vs_exact_pre_rerank")
+        if pre is None and "ann_recall_vs_exact" in m and m["ann_recall_vs_exact"] is not None:
+            pre = m["ann_recall_vs_exact"]
+        pre_str = f"{pre:.4f}" if isinstance(pre, (int, float)) else "n/a"
+        status = status_map.get(name, {}).get("status", "")
         rows.append(
             (
                 name,
-                f"{m.get(recall_key, 0.0):.4f}",
-                f"{m.get(ndcg_key, 0.0):.4f}",
-                f"{m.get('mrr', 0.0):.4f}",
-                f"{m['ann_recall_vs_exact']:.4f}" if "ann_recall_vs_exact" in m else "n/a",
+                f"{_num(m.get(recall_key)):.4f}",
+                f"{_num(m.get(ndcg_key)):.4f}",
+                f"{_num(m.get('mrr')):.4f}",
+                pre_str,
+                status,
             )
         )
-    widths = [max(len(headers[i]), max((len(r[i]) for r in rows), default=0)) for i in range(5)]
+    widths = [max(len(headers[i]), max((len(r[i]) for r in rows), default=0)) for i in range(6)]
     sep = "  ".join("-" * w for w in widths)
     header_line = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
     lines = ["", "=== evaluation metrics ===", header_line, sep]
     for row in rows:
-        lines.append("  ".join(row[i].ljust(widths[i]) for i in range(5)))
+        lines.append("  ".join(row[i].ljust(widths[i]) for i in range(6)))
     lines.append("")
     print("\n".join(lines), file=sys.stderr)
 
@@ -350,14 +485,53 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"event": "eval.golden_set_error", "message": str(e)}))
         return EXIT_COULD_NOT_RUN
 
+    # ---- Reranker config (hot config) ---------------------------------- #
+    # Weights, MMR settings, and `enable_mmr` come from config/hot.yaml.
+    # A missing or malformed file is a runtime error: there is no report
+    # to compare, so this is not a gate failure.
+    try:
+        hot_store = HotConfigStore.from_path(args.hot_config)
+        rerank_config = hot_store.get().rerank.to_rerank_config()
+    except Exception as e:
+        print(json.dumps({"event": "eval.hot_config_error", "message": str(e)}))
+        return EXIT_COULD_NOT_RUN
+
+    # Two rerankers: one with MMR off, one on. The arm name is the
+    # report key; the config each arm uses decides whether MMR runs.
+    config_no_mmr = RerankConfig(
+        w_sim=rerank_config.w_sim,
+        w_pop=rerank_config.w_pop,
+        w_rec=rerank_config.w_rec,
+        mmr_lambda=rerank_config.mmr_lambda,
+        mmr_window=rerank_config.mmr_window,
+        mmr_min_k=rerank_config.mmr_min_k,
+        candidate_multiplier=rerank_config.candidate_multiplier,
+        recency_half_life_days=rerank_config.recency_half_life_days,
+        enable_mmr=False,
+    )
+    config_with_mmr = RerankConfig(
+        w_sim=rerank_config.w_sim,
+        w_pop=rerank_config.w_pop,
+        w_rec=rerank_config.w_rec,
+        mmr_lambda=rerank_config.mmr_lambda,
+        mmr_window=rerank_config.mmr_window,
+        mmr_min_k=rerank_config.mmr_min_k,
+        candidate_multiplier=rerank_config.candidate_multiplier,
+        recency_half_life_days=rerank_config.recency_half_life_days,
+        enable_mmr=True,
+    )
+    reranker_no_mmr = WeightedBlendReranker(config_no_mmr)
+    reranker_with_mmr = WeightedBlendReranker(config_with_mmr)
+    arms_to_run = _selected_arms(args.arms)
+
     # ---- Systems ------------------------------------------------------- #
     exact_backend = NumpyBackend.from_run_directory(inputs.run_dir)
     embedding_lookup = exact_backend.embedding_for
 
-    systems: dict[str, dict[str, float]] = {}
+    systems: dict[str, dict[str, float | None]] = {}
+    system_status: dict[str, dict[str, Any]] = {}
     required_systems: list[str] = []
 
-    # Random
     systems["random_baseline"] = _evaluate_baseline(
         baseline_fn=random_baseline,
         item_ids=catalog_ids,
@@ -366,7 +540,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     required_systems.append("random_baseline")
 
-    # Popularity
     systems["popularity_synthetic"] = _evaluate_popularity(
         item_ids=catalog_ids,
         golden_set=golden_set,
@@ -374,7 +547,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     required_systems.append("popularity_synthetic")
 
-    # Exact kNN
     systems["exact_knn"] = _evaluate_vector_system(
         backend=exact_backend,
         golden_set=golden_set,
@@ -384,28 +556,74 @@ def main(argv: list[str] | None = None) -> int:
     )
     required_systems.append("exact_knn")
 
-    # pgvector (optional)
-    if not args.no_pgvector:
-        conn = _try_open_database()
-        if conn is not None:
-            try:
-                pg_backend = PgvectorBackend.from_registry(conn, hnsw_ef_search=100)
-                systems["pgvector_hnsw"] = _evaluate_vector_system(
+    # Providers are built once and shared by every arm.
+    conn = None if args.no_pgvector else _try_open_database()
+    popularity_provider, recency_provider = _build_rerank_providers(conn)
+
+    # exact_knn_blend (diagnostic, informational): an upper bound on what
+    # the reranker can do without an ANN approximation in the way.
+    if "exact_knn_blend" in arms_to_run:
+        metrics, status = _evaluate_rerank_arm_system(
+            backend=exact_backend,
+            golden_set=golden_set,
+            embedding_lookup=embedding_lookup,
+            exact_backend=exact_backend,
+            k=args.k,
+            config=config_no_mmr,
+            reranker=reranker_no_mmr,
+            popularity_provider=popularity_provider,
+            recency_provider=recency_provider,
+        )
+        systems["exact_knn_blend"] = metrics
+        system_status["exact_knn_blend"] = status
+
+    # pgvector_hnsw (retrieval only) and the two pgvector arms.
+    if conn is not None:
+        try:
+            pg_backend = PgvectorBackend.from_registry(conn, hnsw_ef_search=100)
+            systems["pgvector_hnsw"] = _evaluate_vector_system(
+                backend=pg_backend,
+                golden_set=golden_set,
+                embedding_lookup=embedding_lookup,
+                exact_backend=exact_backend,
+                k=args.k,
+            )
+            required_systems.append("pgvector_hnsw")
+
+            if "blend" in arms_to_run:
+                metrics, status = _evaluate_rerank_arm_system(
                     backend=pg_backend,
                     golden_set=golden_set,
                     embedding_lookup=embedding_lookup,
                     exact_backend=exact_backend,
                     k=args.k,
+                    config=config_no_mmr,
+                    reranker=reranker_no_mmr,
+                    popularity_provider=popularity_provider,
+                    recency_provider=recency_provider,
                 )
-                required_systems.append("pgvector_hnsw")
-            except EvaluationError as e:
-                print(json.dumps({"event": "eval.pgvector_skipped", "message": str(e)}))
-            finally:
-                # Best-effort close: if the connection is already broken,
-                # releasing it is the OS's job and there is nothing
-                # useful to do here.
-                with contextlib.suppress(Exception):
-                    conn.close()
+                systems["pgvector_hnsw_blend"] = metrics
+                system_status["pgvector_hnsw_blend"] = status
+
+            if "blend_mmr" in arms_to_run:
+                metrics, status = _evaluate_rerank_arm_system(
+                    backend=pg_backend,
+                    golden_set=golden_set,
+                    embedding_lookup=embedding_lookup,
+                    exact_backend=exact_backend,
+                    k=args.k,
+                    config=config_with_mmr,
+                    reranker=reranker_with_mmr,
+                    popularity_provider=popularity_provider,
+                    recency_provider=recency_provider,
+                )
+                systems["pgvector_hnsw_blend_mmr"] = metrics
+                system_status["pgvector_hnsw_blend_mmr"] = status
+        except EvaluationError as e:
+            print(json.dumps({"event": "eval.pgvector_skipped", "message": str(e)}))
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close()
 
     # ---- Report -------------------------------------------------------- #
     commit = args.commit if args.commit is not None else _env_commit()
@@ -415,6 +633,7 @@ def main(argv: list[str] | None = None) -> int:
         commit=commit,
         created_at=created_at,
         systems=systems,
+        system_status=system_status,
     )
     write_report(args.report, report)
     print(
@@ -429,17 +648,38 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # ---- Metrics summary (human-readable, on stderr) ------------------- #
-    # A compact table so the numbers are visible in the CI log without
-    # having to download the report artifact. Written to stderr because
-    # stdout is reserved for the single-line JSON events above.
-    _print_metrics_summary(systems, k=args.k)
+    _print_metrics_summary(systems, k=args.k, system_status=system_status)
 
     # ---- Gate ---------------------------------------------------------- #
+    # Exit-code contract:
+    #   0  gate passed
+    #   1  gate failed (a metric is below threshold, or a version/commit/
+    #      freshness check failed)
+    #   2  the evaluation could not run (missing inputs, malformed
+    #      thresholds, or an arm in the gate section that returned
+    #      status="error")
     try:
         thresholds = load_thresholds(args.thresholds)
     except ThresholdError as e:
         print(json.dumps({"event": "eval.thresholds_error", "message": str(e)}))
         return EXIT_COULD_NOT_RUN
+
+    # An arm in the gate section whose status is "error" is a runtime
+    # error, not a gate failure: there is no number to compare. An arm in
+    # informational whose status is "error" is logged but does not change
+    # the exit code.
+    for name, info in system_status.items():
+        if info.get("status") == "error" and name in thresholds.per_system:
+            print(
+                json.dumps(
+                    {
+                        "event": "eval.arm_error",
+                        "system": name,
+                        "message": info.get("error_message"),
+                    }
+                )
+            )
+            return EXIT_COULD_NOT_RUN
 
     now = None if args.no_freshness_check else dt.datetime.now(dt.UTC)
     result = evaluate_gate(
