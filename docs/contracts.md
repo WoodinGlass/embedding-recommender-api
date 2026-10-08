@@ -810,7 +810,9 @@ not listed here is a contract violation caught by
 | `recsys_errors_total` | counter | `type` | `type` ∈ `auth`/`validation`/`retrieval`/`cache`/`upstream`/`internal` |
 | `recsys_rerank_duration_seconds` | histogram | `arm` | Time spent in the re-ranker, by experiment arm (ADR-0016) |
 | `recsys_rerank_failures_total` | counter | `step`, `type` | `step` ∈ `normalize`/`blend`/`mmr` (ADR-0016) |
-| `recsys_rerank_skipped_total` | counter | `reason` | `reason` ∈ `no_vectors`/`k_below_threshold` (ADR-0016) |
+| `recsys_rerank_skipped_total` | counter | `reason` | `reason` ∈ `no_vectors`/`k_below_min` (ADR-0016) |
+| `recsys_rerank_signal_missing_total` | counter | `signal` | `signal` ∈ `popularity`/`recency` (ADR-0016) |
+| `recsys_rerank_mmr_active_total` | counter | `active` | `active` ∈ `true`/`false` (ADR-0016) |
 | `recsys_rate_limit_hits_total` | counter | `class_name`, `result` | `result` ∈ `allowed`/`limited` (ADR-0014) |
 | `recsys_rate_limit_remaining` | histogram | `class_name` | Tokens left at decision time (ADR-0014) |
 | `recsys_rate_limit_degraded` | gauge | — | `1` when the per-instance fallback limiter is active (ADR-0014) |
@@ -930,7 +932,7 @@ reserved fields, no raw credential, no raw `user_id`).
 | `retrieval.fallback.ann` | WARNING | Tier 3 was reached | `reason` ∈ `timeout`/`error`, `ann_timeout_ms`, `latency_ms` |
 | `retrieval.fallback.cached` | WARNING | Tier 4 was reached | `reason` ∈ `db_breaker_open`/`db_error`, `cache_age_seconds`, `row_count` |
 | `retrieval.fallback.none` | ERROR | Tier 5; the response is `503` | the reasons every tier failed |
-| `rerank.mmr.skipped` | DEBUG | MMR was not applied | `reason` ∈ `no_vectors`/`k_below_threshold` |
+| `rerank.mmr.skipped` | DEBUG | MMR was not applied | `reason` ∈ `no_vectors`/`k_below_min` |
 | `rerank.signal.missing` | WARNING | A re-ranker signal provider raised; treated as neutral | `signal` (`popularity`/`recency`) |
 | `rerank.failed` | WARNING | A re-ranker step raised; the retrieval list is returned | `step` ∈ `normalize`/`blend`/`mmr`, `error.type` |
 | `experiment.assigned` | DEBUG | A variant was assigned | `experiment`, `variant`, `bucket` |

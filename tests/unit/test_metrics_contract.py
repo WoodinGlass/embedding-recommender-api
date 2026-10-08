@@ -26,6 +26,11 @@ def test_contracts_file_exists() -> None:
         "recsys_cache_requests_total",
         "recsys_cache_write_errors_total",
         "recsys_circuit_breaker_trips_total",
+        "recsys_rerank_mmr_active_total",
+        "recsys_rerank_signal_missing_total",
+        "recsys_rerank_skipped_total",
+        "recsys_rerank_failures_total",
+        "recsys_rerank_duration_seconds",
         "recsys_circuit_breaker_state_changes_total",
         "recsys_circuit_breaker_state",
         "recsys_cache_negative_hits_total",
@@ -58,5 +63,10 @@ def test_metric_objects_exposed() -> None:
     assert metrics.CIRCUIT_BREAKER_STATE is not None
     assert metrics.CIRCUIT_BREAKER_STATE_CHANGES_TOTAL is not None
     assert metrics.CIRCUIT_BREAKER_TRIPS_TOTAL is not None
+    assert metrics.RERANK_DURATION is not None
+    assert metrics.RERANK_FAILURES_TOTAL is not None
+    assert metrics.RERANK_SKIPPED_TOTAL is not None
+    assert metrics.RERANK_SIGNAL_MISSING_TOTAL is not None
+    assert metrics.RERANK_MMR_ACTIVE_TOTAL is not None
     assert metrics.RATE_LIMIT_REMAINING is not None
     assert metrics.RATE_LIMIT_LUA_ERRORS_TOTAL is not None

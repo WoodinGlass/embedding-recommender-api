@@ -151,3 +151,42 @@ CIRCUIT_BREAKER_TRIPS_TOTAL = Counter(
     labelnames=("name", "reason"),  # threshold | probe_failed
     registry=REGISTRY,
 )
+
+# ------------------------------------------------------------------ #
+# re-ranker (ADR-0016)
+# ------------------------------------------------------------------ #
+RERANK_DURATION = Histogram(
+    "recsys_rerank_duration_seconds",
+    "Time spent in the re-ranker, by experiment arm.",
+    labelnames=("arm",),  # retrieval | blend | blend_mmr
+    buckets=_LATENCY_BUCKETS,
+    registry=REGISTRY,
+)
+
+RERANK_FAILURES_TOTAL = Counter(
+    "recsys_rerank_failures_total",
+    "A re-ranker step that raised, by step and bounded exception type.",
+    labelnames=("step", "type"),  # step in {normalize, blend, mmr}
+    registry=REGISTRY,
+)
+
+RERANK_SKIPPED_TOTAL = Counter(
+    "recsys_rerank_skipped_total",
+    "A re-ranker step skipped, by reason.",
+    labelnames=("reason",),  # no_vectors | k_below_min | no_candidates
+    registry=REGISTRY,
+)
+
+RERANK_SIGNAL_MISSING_TOTAL = Counter(
+    "recsys_rerank_signal_missing_total",
+    "A signal provider that raised or timed out and was treated as neutral.",
+    labelnames=("signal",),  # popularity | recency
+    registry=REGISTRY,
+)
+
+RERANK_MMR_ACTIVE_TOTAL = Counter(
+    "recsys_rerank_mmr_active_total",
+    "Requests where MMR ran, by active flag.",
+    labelnames=("active",),  # true | false
+    registry=REGISTRY,
+)
