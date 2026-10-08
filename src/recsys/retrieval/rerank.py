@@ -281,12 +281,130 @@ def recency_decay(age_days: float, *, half_life_days: int) -> float:
     return float(0.5 ** (age_days / half_life_days))
 
 
+class RerankError(RuntimeError):
+    """A re-ranker step failed.
+
+    ``step`` is one of ``normalize`` / ``blend`` / ``mmr`` and is the
+    label the caller reports as ``recsys_rerank_failures_total{step}``.
+    ``cause`` is the underlying exception, kept for logging.
+
+    The re-ranker raises; it does not neutralize its own failure. The
+    caller catches ``RerankError``, returns the retrieval result
+    (ADR-0016 § Failure behavior), and emits the metric. Keeping the
+    metric in the caller is what keeps the re-ranker pure: no clock, no
+    connection, no process-wide state.
+    """
+
+    def __init__(self, *, step: str, cause: BaseException) -> None:
+        super().__init__(f"rerank step {step!r} failed: {type(cause).__name__}")
+        self.step = step
+        self.cause = cause
+
+
+class WeightedBlendReranker:
+    """Normalize, blend, and (from M3.4.4b) diversify.
+
+    This implementation runs the first two steps of ADR-0016 § Decision
+    and defers MMR. A config with ``enable_mmr=True`` is rejected at
+    construction with ``NotImplementedError`` so an arm that expects MMR
+    cannot silently run without it: the next commit fills the step and
+    the raise is removed then.
+
+    **The re-ranker is pure.** It reads no clock, opens no connection,
+    and consults no process-wide state. Two consequences:
+
+    - Providers (popularity, recency) are called by the *caller* before
+      the ``Candidate`` list is built. A provider that raised or timed
+      out is the caller's to neutralize — it passes the signal name in
+      ``missing_signals`` and the re-ranker applies the neutral value to
+      every candidate.
+    - Metrics are emitted by the caller. The re-ranker raises
+      ``RerankError`` on an internal failure; the caller catches it,
+      returns the retrieval result, and increments
+      ``recsys_rerank_failures_total{step, type}``.
+
+    The output is sorted by ``(score DESC, item_id ASC)``: a score tie
+    is resolved by the item id, ascending, byte-for-byte. This is the
+    total order ADR-0016 § Determinism requires.
+    """
+
+    name: str = "weighted_blend"
+
+    def __init__(self, config: RerankConfig) -> None:
+        if config.enable_mmr:
+            raise NotImplementedError(
+                "MMR lands in the next commit; construct with enable_mmr=False"
+            )
+        self._config = config
+
+    def rerank(
+        self,
+        *,
+        candidates: list[Candidate],
+        k: int,
+        missing_signals: frozenset[str] = frozenset(),
+    ) -> list[tuple[str, float]]:
+        """Return at most ``k`` ``(item_id, score)`` pairs.
+
+        ``missing_signals`` names the signals whose provider failed; the
+        re-ranker applies the neutral value to every candidate for each
+        named signal and does not otherwise change its behavior. The set
+        is a subset of ``{"popularity", "recency"}``; an unknown name is
+        ignored, so a caller that adds a signal in the future without
+        updating the re-ranker does not crash the request.
+        """
+        if k < 1:
+            raise ValueError(f"k must be >= 1, got {k!r}")
+        if not candidates:
+            return []
+
+        try:
+            sim_norm = minmax_norm([c.similarity for c in candidates])
+        except Exception as exc:
+            raise RerankError(step="normalize", cause=exc) from exc
+
+        if "popularity" in missing_signals:
+            pop_norm = [NEUTRAL_NORM] * len(candidates)
+        else:
+            try:
+                pop_norm = rank_norm([c.popularity for c in candidates])
+            except Exception as exc:
+                raise RerankError(step="normalize", cause=exc) from exc
+
+        if "recency" in missing_signals:
+            rec_norm = [NEUTRAL_NORM] * len(candidates)
+        else:
+            try:
+                half_life = self._config.recency_half_life_days
+                rec_norm = [recency_decay(c.age_days, half_life_days=half_life) for c in candidates]
+            except Exception as exc:
+                raise RerankError(step="normalize", cause=exc) from exc
+
+        try:
+            cfg = self._config
+            scored = [
+                (
+                    candidates[i].item_id,
+                    cfg.w_sim * sim_norm[i] + cfg.w_pop * pop_norm[i] + cfg.w_rec * rec_norm[i],
+                )
+                for i in range(len(candidates))
+            ]
+        except Exception as exc:
+            raise RerankError(step="blend", cause=exc) from exc
+
+        # (score DESC, item_id ASC); the tie-break is a total order.
+        scored.sort(key=lambda pair: (-pair[1], pair[0]))
+        return scored[:k]
+
+
 __all__ = [
     "MINMAX_EPS",
     "NEUTRAL_NORM",
     "Candidate",
     "RerankConfig",
+    "RerankError",
     "Reranker",
+    "WeightedBlendReranker",
     "minmax_norm",
     "rank_norm",
     "recency_decay",
