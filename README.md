@@ -44,9 +44,13 @@ Embedding-based recommendation service with low-latency ANN retrieval (target p9
 flowchart TB
   subgraph OFFLINE["Offline / batch (plain Python CLI; orchestration lands in M6)"]
     CAT[("Catalog")] --> EMB["Embed job<br/>ONNX encoder"]
-    EMB --> IDX["Build HNSW index<br/>(new version)"]
-    IDX --> EVAL["Offline eval gate<br/>Recall@k, NDCG, MRR"]
-    EVAL --> REG[("Model + index registry")]
+    EMB --> RUNS[("Versioned runs<br/>artifacts/embeddings/ + current")]
+    RUNS --> BLD["Build HNSW index<br/>(new index_version)"]
+    BLD --> IDXREG[("index_registry<br/>+ embedding table<br/>(PostgreSQL)")]
+    IDXREG --> PROM["Promote<br/>(blue/green pointer)"]
+    IDXREG --> EVAL["Offline eval gate<br/>Recall@k, NDCG, MRR, ANN fidelity"]
+    GS[("Golden set v1")] --> EVAL
+    EVAL --> GATE{"Below threshold<br/>or absolute floor?"}
   end
 
   subgraph ONLINE["Online serving (FastAPI)"]
@@ -61,7 +65,7 @@ flowchart TB
     FB --> OUT
   end
 
-  REG -- "promote (blue/green)" --> ANN
+  IDXREG -- "active index_version" --> ANN
   API -.-> OBS["Prometheus, Grafana,<br/>OpenTelemetry, structlog"]
 ```
 
