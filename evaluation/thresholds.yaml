@@ -15,6 +15,21 @@
 schema_version: 1
 golden_set_version: "v1"
 
+# Systems whose metrics are logged and reviewed but do NOT fail a build.
+# A new evaluation arm lands here until a first measurement exists to set
+# a meaningful threshold. A threshold of 0.00 in the gate section would
+# be a gate that cannot fail; listing the arm here is honest about the
+# fact that no threshold exists yet.
+#
+# Promotion to the gate section: after the arm has a measured baseline in
+# evaluation/report.json, set its threshold to `measured - 0.05` (or the
+# maintainer's chosen margin) and remove it from this list. Record the
+# decision in thresholds_history.yaml.
+informational:
+  - exact_knn_blend
+  - pgvector_hnsw_blend
+  - pgvector_hnsw_blend_mmr
+
 # Absolute floors: a run below any floor fails the gate regardless of the
 # per-system thresholds. These encode the minimum quality this project
 # considers acceptable for the sample catalog. They are not derived from

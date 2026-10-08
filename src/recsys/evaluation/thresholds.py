@@ -42,12 +42,23 @@ class ThresholdError(Exception):
 
 @dataclass(frozen=True)
 class Thresholds:
-    """A parsed, validated threshold file."""
+    """A parsed, validated threshold file.
+
+    ``per_system`` and ``absolute_floor`` are the two maps the gate
+    compares against. ``informational_systems`` is a set of system
+    names that appear in the report but are **not** gated: their
+    metrics are logged and reviewed but do not fail a build. A new
+    evaluation arm lands here until a first measurement exists to set
+    a meaningful threshold; a threshold of ``0.00`` in ``per_system``
+    would be a gate that cannot fail, which is worse than no gate at
+    all because it hides the absence.
+    """
 
     schema_version: int
     golden_set_version: str
     absolute_floor: dict[str, dict[str, float]]
     per_system: dict[str, dict[str, float]]
+    informational_systems: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -113,8 +124,10 @@ def load_thresholds(path: pathlib.Path) -> Thresholds:
             raise ThresholdError(f"absolute_floor.{sys_name}: must be a mapping of metric→number")
         absolute_floor[sys_name] = _validate_metric_map(metrics, f"absolute_floor.{sys_name}")
 
+    informational_systems = _parse_informational(doc.get("informational"))
+
     per_system: dict[str, dict[str, float]] = {}
-    reserved = {"schema_version", "golden_set_version", "absolute_floor"}
+    reserved = {"schema_version", "golden_set_version", "absolute_floor", "informational"}
     for key, value in doc.items():
         if key in reserved:
             continue
@@ -127,12 +140,41 @@ def load_thresholds(path: pathlib.Path) -> Thresholds:
     if not per_system:
         raise ThresholdError("no per-system thresholds found")
 
+    # A system named in both places is a mistake: the informational list
+    # is exactly the set of systems that are not gated, so having a
+    # threshold for one of them is confusing. Reject rather than guess
+    # which the author meant.
+    overlap = informational_systems & set(per_system)
+    if overlap:
+        raise ThresholdError(f"system(s) in both gate and informational: {sorted(overlap)}")
+
     return Thresholds(
         schema_version=_SCHEMA_VERSION,
         golden_set_version=golden_set_version,
         absolute_floor=absolute_floor,
         per_system=per_system,
+        informational_systems=informational_systems,
     )
+
+
+def _parse_informational(raw: Any) -> frozenset[str]:
+    """Parse the optional ``informational`` list of system names.
+
+    An absent section is the empty set (no system is informational).
+    A present section must be a list of non-empty strings. A string
+    instead of a list is rejected: a single-name shortcut looks like a
+    typo for a list and is not worth the flexibility.
+    """
+    if raw is None:
+        return frozenset()
+    if not isinstance(raw, list):
+        raise ThresholdError("informational must be a list of system names")
+    out: set[str] = set()
+    for entry in raw:
+        if not isinstance(entry, str) or not entry:
+            raise ThresholdError(f"informational entries must be non-empty strings, got {entry!r}")
+        out.add(entry)
+    return frozenset(out)
 
 
 def _validate_metric_map(value: dict[Any, Any], where: str) -> dict[str, float]:
@@ -239,6 +281,12 @@ def evaluate_gate(
         )
     for system_name, system_data in systems.items():
         if not isinstance(system_data, dict):
+            continue
+        # Informational systems are logged, not gated. See the
+        # Thresholds docstring for why: a system without a measured
+        # baseline cannot have a meaningful threshold, and a threshold
+        # of 0.00 is a gate that cannot fail.
+        if system_name in thresholds.informational_systems:
             continue
         metrics = system_data.get("metrics")
         if not isinstance(metrics, dict):

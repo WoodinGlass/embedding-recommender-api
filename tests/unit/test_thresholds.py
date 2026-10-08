@@ -35,6 +35,7 @@ def _write_thresholds(
     golden_set_version: str = "v1",
     absolute_floor: dict[str, dict[str, float]] | None = None,
     per_system: dict[str, dict[str, float | None]] | None = None,
+    informational: list[str] | None = None,
     extra_toplevel: str | None = None,
 ) -> None:
     """Write a thresholds YAML file for tests.
@@ -53,6 +54,8 @@ def _write_thresholds(
         doc["absolute_floor"] = absolute_floor
     if per_system is not None:
         doc.update(per_system)
+    if informational is not None:
+        doc["informational"] = informational
     text = yaml.safe_dump(doc, sort_keys=False)
     if extra_toplevel:
         text = text + extra_toplevel
@@ -462,3 +465,130 @@ def test_metric_failure_is_frozen() -> None:
     f = MetricFailure(system="s", metric="m", value=0.1, threshold=0.2, kind="per_system")
     with pytest.raises(FrozenInstanceError):
         f.value = 0.9  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# informational systems (M3.4.9c)
+# --------------------------------------------------------------------------- #
+def test_load_informational_default_empty(tmp_path: pathlib.Path) -> None:
+    _write_thresholds(
+        tmp_path / "t.yaml",
+        absolute_floor={},
+        per_system={"pgvector_hnsw": {"ndcg_at_10": 0.5}},
+    )
+    th = load_thresholds(tmp_path / "t.yaml")
+    assert th.informational_systems == frozenset()
+
+
+def test_load_informational_parsed(tmp_path: pathlib.Path) -> None:
+    _write_thresholds(
+        tmp_path / "t.yaml",
+        absolute_floor={},
+        per_system={"pgvector_hnsw": {"ndcg_at_10": 0.5}},
+        informational=["pgvector_hnsw_blend", "pgvector_hnsw_blend_mmr"],
+    )
+    th = load_thresholds(tmp_path / "t.yaml")
+    assert th.informational_systems == frozenset({"pgvector_hnsw_blend", "pgvector_hnsw_blend_mmr"})
+
+
+def test_load_informational_not_a_list(tmp_path: pathlib.Path) -> None:
+    _write_thresholds(
+        tmp_path / "t.yaml",
+        absolute_floor={},
+        per_system={"pgvector_hnsw": {"ndcg_at_10": 0.5}},
+        extra_toplevel="informational: a_string\n",
+    )
+    with pytest.raises(ThresholdError, match="informational must be a list"):
+        load_thresholds(tmp_path / "t.yaml")
+
+
+def test_load_informational_entry_must_be_string(tmp_path: pathlib.Path) -> None:
+    _write_thresholds(
+        tmp_path / "t.yaml",
+        absolute_floor={},
+        per_system={"pgvector_hnsw": {"ndcg_at_10": 0.5}},
+        informational=[1, 2],  # type: ignore[list-item]
+    )
+    with pytest.raises(ThresholdError, match="non-empty strings"):
+        load_thresholds(tmp_path / "t.yaml")
+
+
+def test_load_informational_overlap_with_gate_rejected(tmp_path: pathlib.Path) -> None:
+    """A system in both the gate and informational sections is ambiguous;
+    the loader refuses rather than guessing which the author meant."""
+    _write_thresholds(
+        tmp_path / "t.yaml",
+        absolute_floor={},
+        per_system={"pgvector_hnsw_blend": {"ndcg_at_10": 0.5}},
+        informational=["pgvector_hnsw_blend"],
+    )
+    with pytest.raises(ThresholdError, match="both gate and informational"):
+        load_thresholds(tmp_path / "t.yaml")
+
+
+def test_gate_ignores_informational_system(tmp_path: pathlib.Path) -> None:
+    """A system in the informational list is logged, not gated: its metrics
+    are compared to nothing, so a low value does not fail a build."""
+    _write_thresholds(
+        tmp_path / "t.yaml",
+        absolute_floor={},
+        per_system={"pgvector_hnsw": {"ndcg_at_10": 0.5}},
+        informational=["pgvector_hnsw_blend"],
+    )
+    th = load_thresholds(tmp_path / "t.yaml")
+    report = {
+        "golden_set_version": "v1",
+        "commit": "abc",
+        "created_at": "2026-01-01T00:00:00Z",
+        "systems": {
+            "pgvector_hnsw": {"metrics": {"ndcg_at_10": 0.9}},
+            "pgvector_hnsw_blend": {"metrics": {"ndcg_at_10": 0.001}},
+        },
+    }
+    result = evaluate_gate(th, report)
+    assert result.passed is True
+
+
+def test_gate_informational_does_not_bypass_required_system(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``required_systems`` still applies to informational systems: a
+    required system that does not appear in the report is a failure, even
+    if it is not gated on metrics."""
+    _write_thresholds(
+        tmp_path / "t.yaml",
+        absolute_floor={},
+        per_system={"pgvector_hnsw": {"ndcg_at_10": 0.5}},
+        informational=["pgvector_hnsw_blend"],
+    )
+    th = load_thresholds(tmp_path / "t.yaml")
+    report = {
+        "golden_set_version": "v1",
+        "commit": "abc",
+        "created_at": "2026-01-01T00:00:00Z",
+        "systems": {"pgvector_hnsw": {"metrics": {"ndcg_at_10": 0.9}}},
+    }
+    result = evaluate_gate(th, report, required_systems=["pgvector_hnsw_blend"])
+    assert result.passed is False
+    assert result.reason is not None
+    assert "missing from report" in result.reason
+
+
+def test_gate_non_informational_still_fails_normally(tmp_path: pathlib.Path) -> None:
+    """Sanity: removing a system from informational puts it back under the
+    gate. A regression in the informational path would silently disable
+    every threshold; this test catches that."""
+    _write_thresholds(
+        tmp_path / "t.yaml",
+        absolute_floor={},
+        per_system={"pgvector_hnsw": {"ndcg_at_10": 0.5}},
+    )
+    th = load_thresholds(tmp_path / "t.yaml")
+    report = {
+        "golden_set_version": "v1",
+        "commit": "abc",
+        "created_at": "2026-01-01T00:00:00Z",
+        "systems": {"pgvector_hnsw": {"metrics": {"ndcg_at_10": 0.4}}},
+    }
+    result = evaluate_gate(th, report)
+    assert result.passed is False
