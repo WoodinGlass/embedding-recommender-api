@@ -57,29 +57,68 @@ which is not what "diversity" is meant to be measured against.
 
 ### Step 1 — Normalization
 
-**`sim`:** min-max scaled within the candidate window.
+Each signal is normalized to `[0, 1]` **within the candidate window**.
+The window is the retrieval result (`candidate_k = k × candidate_multiplier`),
+not the catalog. The question at this stage is "which of these candidates
+is best on this signal", not "how good is this candidate in absolute
+terms".
+
+**`sim`:** min-max scaled within the window.
 
 ```
-sim_norm = (sim - min_sim) / (max_sim - min_sim)
+sim_norm = (sim - min_sim) / (max_sim - min_sim + eps)
 ```
 
-The window is the retrieval result, not the catalog. Retrieval already
-chose the top candidates; re-ranking orders them. Min-max over the window
-is the right scale because the question is "which of these candidates
-is most similar", not "how similar is this candidate in absolute terms".
+`eps = 1e-8`. The candidate window comes from an ANN search, whose
+result set is usually tight; when every candidate has the same
+similarity (a degenerate window), `max == min` and the divisor collapses
+to `eps`, which drives every `sim_norm` to `0.0`. The degenerate-case
+rule below overrides that outcome before it can be observed: if
+`max == min`, every candidate gets `0.5` regardless of the raw formula.
 
-**`pop`:** log-scaled, then min-max.
+`Candidate.similarity` is always a **cosine similarity in `[-1, 1]`**,
+higher is better. Conversion from a distance (the `PgvectorBackend`
+returns `vector_cosine_ops` distances, where `distance = 1 - similarity`)
+happens **in the caller**, before the candidate is constructed. The
+re-ranker never guesses at the metric; it reads the field and treats
+it as similarity.
+
+**`pop`:** rank-based, higher-is-better.
 
 ```
-pop_log = log1p(max(pop, 0))
-pop_norm = (pop_log - min_pop_log) / (max_pop_log - min_pop_log)
+rank_i = position of candidate i in the window sorted by popularity DESC (0-based)
+pop_norm = 1.0 if n == 1 else 1.0 - (rank_i / (n - 1))
 ```
 
-`log1p` compresses the heavy tail. A popularity distribution is
-long-tailed: the top item may have 10 000 interactions and the fiftieth
-may have 50. Without the log, the first item dominates and the rest are
-indistinguishable. With it, the ordering is preserved but the spacing
-between adjacent candidates is meaningful.
+The highest-popularity candidate has `rank_i = 0` and gets `pop_norm =
+1.0`; the lowest gets `pop_norm = 0.0`. The convention matches `sim`
+and `rec`: a larger value is a better candidate on that signal, and the
+blend multiplies each by a positive weight and sums. There is no
+inversion step in the blend.
+
+**Why not store the raw rank (`rank_i / (n - 1)`, where 0 is best) and
+invert in the blend.** An earlier draft did this and it was
+unnecessarily confusing: two conventions for the same three signals
+("higher is better" for `sim` and `rec`, "lower is better" for `pop`)
+is one place for a future reader to get the polarity wrong, and the
+"invert in the blend" step has no behavioral benefit. The tie-break
+argument that motivated the draft was wrong: two candidates with equal
+popularity produce the same `pop_norm` under either convention, so the
+final `(score DESC, item_id ASC)` sort (see "Determinism" below) is
+what resolves the tie, and it does so identically in both cases.
+
+**Why rank-based and not `log1p` + min-max.** An earlier draft used
+`log1p(pop)` followed by min-max. Review rejected it: the log compresses
+the tail, but the min-max on top of the log is still sensitive to a
+single outlier at the top of the window. A single item with `pop = 10^6`
+in a window whose second-highest is `pop = 100` compresses every other
+`pop_norm` toward `0.0` after the log, so the blend sees "one item with
+popularity, everyone else tied at zero". Rank-based normalization
+preserves the ordering without compressing the spacing between the
+non-outlier candidates: candidate ranks 2 through `n` remain evenly
+spaced regardless of how large the outlier is. The `log1p` step is
+discarded; `pop` is rank-based, `sim` is min-max, and the two methods
+are chosen for the distribution each signal actually has.
 
 **`rec`:** a time-decay, already in `[0, 1]`.
 
@@ -93,18 +132,20 @@ An item added today has `rec_norm = 1`; an item added 90 days ago has
 one parameter and does not reach zero, so an old item is deprioritized
 but never excluded.
 
+`age_days` is measured from `item.created_at`, not `item.updated_at`.
+The choice is deliberate: `updated_at` moves when metadata changes
+(a description edit, a category re-tag), which is not the same as "the
+item is new". A future ADR may add a second decay term for freshness of
+metadata if a measurement shows it matters; at M3 the signal is "how
+recently was the item introduced to the catalog".
+
 **Degenerate cases.** If `max == min` for a signal (every candidate has
 the same value), `_norm` returns `0.5` for every candidate. This is the
 neutral choice: the signal contributes the same amount to every blended
 score and therefore does not change the ordering. Returning `0.0`
 instead would silently remove the signal's weight from the sum; returning
-`1.0` would give it full weight for no information.
-
-**Where normalization windows come from.** The candidate window is the
-retrieval result, which the request path fetches with
-`candidate_k = 4 × k` (see "Candidate window" below). Every signal is
-normalized over that same window, so the four values a caller sees for a
-given item are comparable to each other.
+`1.0` would give it full weight for no information. A window of one
+candidate is degenerate by definition and follows the same rule.
 
 ### Step 2 — Blend
 
@@ -133,6 +174,20 @@ not a config edit that silently changes production behavior.
 MMR is applied to the top-`mmr_window` of the blended list, not the full
 candidate window. `mmr_window` is config (`RERANK_MMR_WINDOW`, default
 50).
+
+**MMR is enabled by an explicit flag, not by the presence of vectors.**
+`RerankConfig.enable_mmr: bool` controls whether MMR runs. When it is
+`False`, the MMR step is skipped and the blended list is returned
+unchanged; `meta.rerank.mmr_active = False`. When it is `True` and the
+candidates carry no vector (a backend that does not expose them), the
+step is skipped with `recsys_rerank_skipped_total{reason="no_vectors"}`
+and `meta.rerank.mmr_active = False`.
+
+An earlier draft inferred MMR from `Candidate.vector is not None`. It
+was rejected: the effective configuration would then depend on which
+backend happened to serve the request, and two responses produced under
+the same arm would silently differ in behavior. The explicit flag makes
+`meta.rerank.mmr_active` auditable and keeps an experiment arm honest.
 
 MMR is O(W²) in the window size W: it computes pairwise similarity
 between the selected items and every remaining candidate at each step.
@@ -205,6 +260,13 @@ The weights are unchanged; the missing signal simply does not
 differentiate candidates. This is the same convention as the "max == min"
 degenerate case, which keeps one code path for "no information".
 
+**A signal provider that times out is treated the same as one that
+raises.** Both providers (`PopularityProvider`, `RecencyProvider`) accept
+a per-call timeout. A timeout is a failure: the signal is neutral, the
+request proceeds, and `recsys_rerank_signal_missing_total{signal}` is
+incremented. A slow provider must not block the request for longer than
+the timeout, and must not fail the request when it does.
+
 **MMR is skipped when the retrieval layer does not expose vectors.**
 Some backends (a remote service that returns ids and scores only, a
 future backend with a different protocol) may not hand back the raw
@@ -222,7 +284,8 @@ New metrics:
 | `recsys_rerank_duration_seconds` | histogram | `arm` | Time spent in the re-ranker, by experiment arm |
 | `recsys_rerank_failures_total` | counter | `step`, `type` | A step (`normalize`, `blend`, `mmr`) that raised |
 | `recsys_rerank_skipped_total` | counter | `reason` | `reason` ∈ `no_vectors` / `k_below_threshold` |
-| `recsys_rerank_signal_missing_total` | counter | `signal` | A provider that raised and was treated as neutral |
+| `recsys_rerank_signal_missing_total` | counter | `signal` | A provider that raised or timed out and was treated as neutral |
+| `recsys_rerank_mmr_active_total` | counter | `active` | `active` ∈ `true` / `false`; MMR ran or was skipped on this request |
 
 The re-ranker's config (weights, `lambda`, half-life, window sizes) is
 recorded in the response's `meta.rerank` object so a client can tell
@@ -231,21 +294,117 @@ which configuration produced a list, and in the log line for the request
 auditable after the fact: the same query under two arms produces two
 responses whose `meta.rerank` differ.
 
+**Cardinality budget.** The label values below are the entire set the
+project accepts for the re-ranker metrics:
+
+| Metric | Allowed labels | Max cardinality |
+|---|---|---|
+| `recsys_rerank_duration_seconds` | `arm` ∈ {`retrieval`, `blend`, `blend_mmr`} | 3 |
+| `recsys_rerank_failures_total` | `step` ∈ {`normalize`, `blend`, `mmr`}, `type` (bounded to top 5 exception classes) | 15 |
+| `recsys_rerank_skipped_total` | `reason` ∈ {`no_vectors`, `k_below_min`, `no_candidates`} | 3 |
+| `recsys_rerank_signal_missing_total` | `signal` ∈ {`popularity`, `recency`} | 2 |
+| `recsys_rerank_mmr_active_total` | `active` ∈ {`true`, `false`} | 2 |
+
+`item_id`, `seed_item_id`, `category`, `brand`, `language`, and any
+per-request value are **forbidden** as labels. Per-request identity
+belongs in logs, traces, or exemplars.
+
 ### The evaluation table
 
-M3 fills the `pgvector HNSW + re-ranker` row of the evaluation table
-(`README.md` § Offline evaluation). The row is measured with the same
-golden set and the same metrics as the retrieval-only row, so the delta
-is attributable to the re-ranker and nothing else.
+M3 fills the re-ranker rows of the evaluation table (`README.md` §
+Offline evaluation). The evaluation runs **three arms** on the same
+golden set:
 
-**The re-ranker must not lower NDCG@10.** If it does, the weights or the
-MMR λ are wrong, and the row is a regression, not a feature. The
-threshold for the row is set after the first measurement (ADR-0010), the
-same procedure as every other system.
+- **`retrieval`** — the retrieval result, no re-ranking. The floor.
+- **`blend`** — retrieval, normalize, weighted blend. No MMR.
+- **`blend_mmr`** — the blend, then MMR on the top-`mmr_window`.
+  Requires a backend that exposes candidate vectors.
 
-The evaluation uses the same re-ranker the API runs, with the same
+Three arms, not one, because "the re-ranker" is not a single change:
+the blend and MMR are independent steps, and the evaluation has to
+attribute a delta to each. A single "with re-ranker" row hides which
+step moved the metric. If the blend helps and MMR hurts, the row would
+show the net effect and the reader would have no way to act on it.
+
+The three arms share the same golden set, the same re-ranker
+implementation, and the same config file. Only `enable_mmr` differs
+between `blend` and `blend_mmr`, and only the re-rank step is skipped
+between `retrieval` and `blend`. This is what makes the deltas
+attributable.
+
+**Production default is `blend` until MMR is measured to help.**
+`blend_mmr` runs in the evaluation only. Once a measurement shows the
+`blend_mmr` row is not below the `blend` row on NDCG@10 and the latency
+cost (M4) is acceptable, the production default flips. Flipping it
+earlier would ship a step whose effect has not been measured.
+
+**The re-ranker must not lower NDCG@10 below the retrieval arm.** If
+`blend` is below `retrieval`, the weights are wrong. The `blend_mmr`
+row is allowed a small decrease against `blend`: MMR trades relevance
+for diversity by design, and the size of the trade is a number the
+evaluation records, not a value this ADR fixes.
+
+Thresholds for each arm are set after the first measurement (ADR-0010),
+the same procedure as every other system. The re-ranker used in
+evaluation is the same implementation the API runs, with the same
 config. A separate "evaluation re-ranker" would be a second
-implementation to keep in sync; the config is the seam.
+implementation to keep in sync; `enable_mmr` and the weights file are
+the seams.
+
+### Determinism
+
+The re-ranker is a pure function of its inputs. Given the same
+`Candidate` list and the same `RerankConfig`, it produces the same
+output list **byte-for-byte**, including tie order. This is required by
+three downstream uses:
+
+- The M2 evaluation gate compares reports across CI runs and would be
+  flaky if tie ordering drifted.
+- An A/B assignment (M5) is meaningful only if a variant's behavior is
+  reproducible; a re-ranker whose order depended on hash randomization
+  would put two callers of the same arm in different buckets.
+- A regression (or its absence) after a deploy is diagnosed by
+  comparing outputs; a non-deterministic re-ranker makes "the output
+  changed" and "the output is different this run" indistinguishable.
+
+**The rule.** Every sort in the re-ranker uses a total order:
+`(score DESC, item_id ASC)`. The score is the blended (or MMR) score;
+the tie-break is the item id, ascending, byte-for-byte. Two candidates
+with equal scores are ordered by id, not by their position in the input
+list and not by their insertion order into a dict.
+
+**Providers must be deterministic too.** A popularity provider that
+returns a different value for the same item across two calls in one
+process is a bug. The synthetic provider in M3 is a hash of the item
+id; the event-based provider in M5 must read a stable snapshot, not a
+counter that increments per call. The re-ranker cannot enforce this;
+the provider contract states it, and a test asserts that the same input
+produces the same output.
+
+### Config validation
+
+The re-ranker's config is read from `config/hot.yaml` (ADR-0022) at
+startup and validated before the first request. A malformed config is a
+startup failure, not a warning: a re-ranker with a negative weight
+produces nonsense scores that are worse than not re-ranking at all, and
+silently falling back to "no re-ranking" would hide the misconfiguration
+behind a metric that only moves by a few points.
+
+The rules, all enforced at startup:
+
+- `w_sim`, `w_pop`, `w_rec` are each in `[0.0, 1.0]`.
+- `w_sim + w_pop + w_rec == 1.0` within `1e-6`. A sum of zero would
+  make every blended score zero; a sum other than one is a likely typo
+  that changes the meaning of every weight.
+- `mmr_lambda` is in `[0.0, 1.0]`.
+- `recency_half_life_days > 0`.
+- `candidate_multiplier >= 1`.
+- `mmr_window >= 1` and `mmr_min_k >= 1`.
+- `enable_mmr` is a bool.
+
+A change to any of these values is an experiment arm (ADR-0017), not a
+silent config edit. The values that produced a response are echoed in
+`meta.rerank` so a client can tell which configuration it saw.
 
 ## Alternatives considered
 
@@ -262,6 +421,8 @@ implementation to keep in sync; the config is the seam.
 | **A learned re-ranker (a small model)** | Needs training data the project does not have at M3 (the event log lands in M5). The rule-based composition is a baseline that is measurable and explainable; a learned model is a candidate for a future ADR once there is data to train it on. |
 | **`lambda` per experiment arm in the query string** | The arm belongs to the assignment (ADR-0017), not to the request. A client that could set `lambda` could compare arms against each other and invalidate the experiment. |
 | **Different re-rankers for `recommend` and `similar`** | `similar` returns items similar to a seed item, where popularity and recency are less meaningful (the user asked for neighbors of this item, not for something popular). M3 uses the same re-ranker for both for simplicity; if `similar` measurements show the blend hurts it, a future ADR splits them. |
+| **`log1p` + min-max for popularity** | An earlier draft. Review rejected it: the min-max on top of the log is still sensitive to a single outlier, which compresses every other candidate toward zero. Rank-based normalization preserves the ordering of the non-outlier candidates regardless of the outlier. |
+| **Infer MMR from `Candidate.vector is not None`** | Makes the effective configuration depend on which backend served the request, so two responses under the same arm silently differ. An explicit `enable_mmr` flag keeps `meta.rerank.mmr_active` auditable. |
 
 ## Consequences
 
