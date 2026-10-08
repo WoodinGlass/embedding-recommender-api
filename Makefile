@@ -80,6 +80,28 @@ test-encoder:  ## Encoder parity tests. Requires the [inference,export] extra.
 eval:  ## Run the offline evaluation and enforce the threshold gate (ADR-0010).
 	$(PY) scripts/eval.py
 
+.PHONY: migrate
+migrate:  ## Apply Alembic migrations (reads DATABASE_URL from the environment).
+	$(PY) -m alembic upgrade head
+
+.PHONY: index-build
+index-build:  ## Build an index from the active embedding run.
+	$(PY) scripts/build_index.py
+
+.PHONY: index-promote
+index-promote:  ## Promote an index. Usage: make index-promote VERSION=idx-xxxx
+	@test -n "$(VERSION)" || (echo "usage: make index-promote VERSION=idx-xxxx" && exit 2)
+	$(PY) scripts/promote_index.py --index-version "$(VERSION)"
+
+.PHONY: index-rollback
+index-rollback:  ## Revert to the most recently retired index.
+	$(PY) scripts/rollback_index.py
+
+.PHONY: bench-faiss
+bench-faiss:  ## Run the FAISS benchmark (requires the [bench] extra) and render it.
+	$(PY) scripts/bench_faiss.py
+	$(PY) scripts/render_benchmark.py
+
 .PHONY: coverage
 coverage:  ## Unit tests with coverage report.
 	$(PY) -m pytest -q -m unit --cov=src/recsys --cov-report=term-missing
