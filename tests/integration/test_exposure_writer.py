@@ -152,3 +152,38 @@ def test_failed_insert_leaves_connection_usable(conn: Any) -> None:
     with conn.cursor() as cur:
         cur.execute("SELECT 1")
         assert cur.fetchone()[0] == 1
+
+
+def test_statement_timeout_set_and_scoped_to_transaction(conn: Any) -> None:
+    """The writer sets `statement_timeout` inside its transaction and
+    the setting must not leak to the next one. This is the regression
+    guard for the CI failure that caught the original
+    ``SET LOCAL statement_timeout = $1``: PostgreSQL's extended-query
+    protocol rejects a placeholder on the right-hand side of ``SET
+    LOCAL``, and the fix is the ``set_config(..., is_local=true)``
+    function form, which accepts parameters.
+
+    The same bug existed in ``PgRecencyProvider`` since M3.4 and was
+    invisible because the evaluation runner marks a provider failure
+    as `degraded` rather than failing the arm. The fix landed in the
+    same commit; the write below is what proved it worked.
+    """
+    r = write_exposure(
+        connection=conn,
+        assignment=_assignment(),
+        user_id_hash=_hash(),
+        request_id=uuid.uuid4().hex,
+    )
+    assert r.inserted is True
+
+    # Outside the writer's transaction, `statement_timeout` is back to
+    # whatever the server's default is (usually 0, meaning no client
+    # timeout). The assertion is "the writer's value did not persist",
+    # not a specific number, so the test does not depend on the CI
+    # image's default.
+    with conn.cursor() as cur:
+        cur.execute("SHOW statement_timeout")
+        current = cur.fetchone()[0]
+    assert current != "500ms", (
+        f"the writer's statement_timeout leaked to the next transaction: {current!r}"
+    )

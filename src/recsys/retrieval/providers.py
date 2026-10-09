@@ -222,11 +222,15 @@ class PgRecencyProvider:
     lifecycle, matching the pattern ``PgvectorBackend`` uses
     (ADR-0012). The provider is a pure strategy over a database.
 
-    The per-call timeout is set with ``SET LOCAL statement_timeout``
-    so it applies to this transaction only. ``SET LOCAL`` is
-    PostgreSQL-specific and is the correct tool: a client-side
-    timeout would leave the query running server-side, and a
-    session-level ``SET`` would outlive the call.
+    The per-call timeout is set with
+    ``set_config('statement_timeout', ..., true)`` so it applies to
+    this transaction only. ``set_config`` with ``is_local=true`` is
+    the SQL form that accepts a bound parameter; ``SET LOCAL ... =
+    $1`` is psql syntax and PostgreSQL's extended-query protocol
+    rejects it with a SyntaxError. The behavior is the same as
+    ``SET LOCAL``: a client-side timeout would leave the query
+    running server-side, and a session-level setting would outlive
+    the call.
     """
 
     name: str = "postgres"
@@ -256,8 +260,9 @@ class PgRecencyProvider:
 
         # The query runs inside an explicit transaction. Two reasons:
         #
-        # 1. ``SET LOCAL`` is scoped to the current transaction; outside
-        #    one, psycopg begins an implicit transaction on the first
+        # 1. The timeout uses ``set_config(..., is_local=true)``,
+        #    which is scoped to the current transaction; outside one,
+        #    psycopg begins an implicit transaction on the first
         #    statement and leaves it open. If the query then fails, the
         #    connection is left in the "aborted" state and the next
         #    statement on the *same connection* fails with
@@ -273,8 +278,8 @@ class PgRecencyProvider:
         try:
             with self._connection.transaction(), self._connection.cursor() as cur:
                 cur.execute(
-                    "SET LOCAL statement_timeout = %s",
-                    (self._timeout_ms,),
+                    "SELECT set_config('statement_timeout', %s, true)",
+                    (str(self._timeout_ms),),
                 )
                 cur.execute(
                     "SELECT item_id, created_at FROM item WHERE item_id = ANY(%s)",

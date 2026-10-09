@@ -110,10 +110,12 @@ def write_exposure(
     distinguish "not logged" from "tried and failed".
 
     ``connection`` is a psycopg connection (sync). ``timeout_seconds``
-    is applied with ``SET LOCAL statement_timeout`` inside the
-    transaction; the value is small because the write is a single
-    indexed insert, and a slow one is a signal, not a workload to
-    wait on.
+    is applied with ``set_config('statement_timeout', ..., true)``
+    inside the transaction; the value is small because the write is a
+    single indexed insert, and a slow one is a signal, not a workload
+    to wait on. The function form (not ``SET LOCAL``) is required:
+    PostgreSQL's extended-query protocol rejects a placeholder on the
+    right-hand side of ``SET LOCAL ... = $1``.
     """
     if timeout_seconds <= 0:
         raise ValueError(f"timeout_seconds must be > 0, got {timeout_seconds!r}")
@@ -133,8 +135,8 @@ def write_exposure(
     try:
         with connection.transaction(), connection.cursor() as cur:
             cur.execute(
-                "SET LOCAL statement_timeout = %s",
-                (timeout_ms,),
+                "SELECT set_config('statement_timeout', %s, true)",
+                (str(timeout_ms),),
             )
             cur.execute(
                 """

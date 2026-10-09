@@ -247,9 +247,9 @@ def test_insert_failure_wraps_and_rolls_back() -> None:
     assert conn.rollbacks == 1
 
 
-def test_set_local_failure_also_rolls_back() -> None:
+def test_set_config_failure_also_rolls_back() -> None:
     conn = _FakeConnection(
-        raise_on="SET LOCAL",
+        raise_on="set_config",
         fail_with=RuntimeError("timeout unsupported"),
     )
     with pytest.raises(ExposureWriteError):
