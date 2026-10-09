@@ -116,8 +116,8 @@ class TestHandlerWiring:
         # returns (PipelineResult | PipelineFailure, source).
         from recsys.api.routers import recommend as rec_router
 
-        async def _fake_run(*_args: Any, **_kwargs: Any) -> tuple[Any, str]:
-            return result, "ann"
+        async def _fake_run(*_args: Any, **_kwargs: Any) -> tuple[Any, str, tuple[Any, ...]]:
+            return result, "ann", ()
 
         monkeypatch.setattr(rec_router, "_run_pipeline", _fake_run)
 
@@ -373,8 +373,8 @@ class TestHandlerFallback:
     ) -> TestClient:
         from recsys.api.routers import recommend as rec_router
 
-        async def _fake_run(*_args: Any, **_kwargs: Any) -> tuple[Any, str]:
-            return pipeline_result, "ann"
+        async def _fake_run(*_args: Any, **_kwargs: Any) -> tuple[Any, str, tuple[Any, ...]]:
+            return pipeline_result, "ann", ()
 
         monkeypatch.setattr(rec_router, "_run_pipeline", _fake_run)
 

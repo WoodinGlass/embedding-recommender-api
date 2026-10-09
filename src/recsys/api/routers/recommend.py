@@ -16,6 +16,7 @@ commits, and until then a dependency failure is a ``503``.
 from __future__ import annotations
 
 from functools import partial
+from typing import Any
 
 import anyio
 from fastapi import APIRouter, HTTPException, Request, status
@@ -37,12 +38,14 @@ from recsys.api.pipeline import (
     sync_retrieve_and_rerank,
 )
 from recsys.api.schemas.recommend import (
+    ExperimentAssignment,
     RecommendItem,
     RecommendMeta,
     RecommendRequest,
     RecommendResponse,
 )
 from recsys.cache import CacheLookup, CacheStore, build_cache_key, jittered_ttl
+from recsys.experiments import run_experiments_for_request
 from recsys.fallback import FallbackResult, serve_fallback
 from recsys.monitoring.logging import get_logger
 from recsys.popularity import PopularityCache
@@ -57,6 +60,11 @@ router = APIRouter(prefix="/v1", tags=["recommend"])
 log = get_logger(__name__)
 
 
+def _to_experiment_assignment(name: str, variant: str) -> ExperimentAssignment:
+    """Build the response's experiment field from an Assignment tuple."""
+    return ExperimentAssignment(name=name, variant=variant)
+
+
 def _to_response(
     *,
     request_id: str,
@@ -64,6 +72,7 @@ def _to_response(
     model_version: str | None,
     index_version: str | None,
     items: tuple[tuple[str, float], ...],
+    experiment: tuple[str, str] | None = None,
 ) -> RecommendResponse:
     """Shape a response for the tier that produced ``items``.
 
@@ -83,7 +92,7 @@ def _to_response(
             source=source,  # type: ignore[arg-type]
             model_version=model_version,
             index_version=index_version,
-            experiment=None,
+            experiment=(None if experiment is None else _to_experiment_assignment(*experiment)),
         ),
     )
 
@@ -96,9 +105,11 @@ async def _run_pipeline(
     hot: object,
     pool: object,
     cache: CacheStore,
+    experiments: object,
     limiter: anyio.CapacityLimiter,
     timeout_seconds: float,
-) -> tuple[PipelineResult | PipelineFailure, str]:
+    request_id: str,
+) -> tuple[PipelineResult | PipelineFailure, str, tuple[Any, ...]]:
     """Run retrieve + rerank, with a cache lookup before retrieve.
 
     Returns ``(result, source)`` where ``source`` is ``"ann"`` (the
@@ -166,17 +177,42 @@ async def _run_pipeline(
                     return (
                         PipelineFailure("ann_error", detail="rerank timeout on cache hit"),
                         "ann",
+                        (),
                     )
-                return rerank_result, "cache"
+                return rerank_result, "cache", ()
 
     # Miss path (or MMR skip path): retrieve + rerank in one hop.
     try:
         pool_ctx = pool.connection()  # type: ignore[attr-defined]
     except Exception as exc:
-        return PipelineFailure("ann_error", detail=f"pool unavailable: {type(exc).__name__}"), "ann"
+        return (
+            PipelineFailure("ann_error", detail=f"pool unavailable: {type(exc).__name__}"),
+            "ann",
+            (),
+        )
 
     try:
         with pool_ctx as conn:
+            # Experiments run before retrieval so an exposure is
+            # written even if retrieval fails and the fallback chain
+            # serves the response. The response carries the first
+            # assignment (ADR-0017 does not yet define multi-
+            # experiment responses); every experiment still gets its
+            # exposure row. An exposure write failure is caught
+            # inside run_experiments_for_request and does not affect
+            # the response.
+            assignments = run_experiments_for_request(
+                connection=conn,
+                experiments=experiments,  # type: ignore[arg-type]
+                user_id=body.user_id,
+                request_id=request_id,
+                env=str(getattr(getattr(settings, "app_env", None), "value", "dev")),
+                disabled=bool(getattr(settings, "experiment_disabled", False)),
+                env_override=getattr(settings, "experiment_env_override", None),
+                user_id_salt=str(getattr(settings, "user_id_hash_salt", "")),
+                user_id_salt_version=int(getattr(settings, "user_id_hash_salt_version", 0)),
+            )
+
             recency_provider = PgRecencyProvider(conn, timeout_seconds=timeout_seconds)
             popularity_provider = SyntheticPopularityProvider()
 
@@ -206,9 +242,14 @@ async def _run_pipeline(
                         "ann_error", detail=f"pipeline timeout after {timeout_seconds}s"
                     ),
                     "ann",
+                    tuple(assignments),
                 )
     except Exception as exc:
-        return PipelineFailure("ann_error", detail=f"{type(exc).__name__}: {exc}"[:200]), "ann"
+        return (
+            PipelineFailure("ann_error", detail=f"{type(exc).__name__}: {exc}"[:200]),
+            "ann",
+            (),
+        )
 
     # Store on the miss path when the retriever produced candidates.
     # Synchronous for M3.6 (the ADR-0015 § Cache-warming note about
@@ -223,7 +264,7 @@ async def _run_pipeline(
         ttl = hot.get().cache.recommend_ttl_seconds  # type: ignore[attr-defined]
         await cache.store(cache_key, rows, ttl_seconds=jittered_ttl(ttl))
 
-    return outcome.result, "ann"
+    return outcome.result, "ann", tuple(assignments)
 
 
 def _candidates_from_cache(
@@ -356,22 +397,23 @@ async def recommend(
     three dependency reasons are a ``503`` today; the fallback
     chain replaces that response in M3.6.6c.
     """
-    del experiments  # used in 6d
     # `principal` is consumed by FastAPI before this function
     # runs: the auth dependency validates the credential. The
     # value is unused until M3.6.6d logs the exposure.
     del principal
     limiter: anyio.CapacityLimiter = request.app.state.thread_limiter
 
-    result, source = await _run_pipeline(
+    result, source, assignments = await _run_pipeline(
         request,
         body=body,
         encoder=encoder,
         hot=hot,
         pool=request.app.state.db_pool,
         cache=cache,
+        experiments=experiments,
         limiter=limiter,
         timeout_seconds=settings.request_timeout_seconds,
+        request_id=request_id,
     )
 
     if isinstance(result, PipelineResult):
@@ -382,12 +424,16 @@ async def recommend(
             n_items=len(result.items),
             index_version=result.index_version,
         )
+        experiment = (
+            (assignments[0].experiment_name, assignments[0].variant) if assignments else None
+        )
         return _to_response(
             request_id=request_id,
             source=source,
             model_version=result.model_version,
             index_version=result.index_version,
             items=result.items,
+            experiment=experiment,
         )
 
     # Client errors.
@@ -430,12 +476,16 @@ async def recommend(
             n_items=len(fallback.items),
             pipeline_reason=result.reason,
         )
+        experiment = (
+            (assignments[0].experiment_name, assignments[0].variant) if assignments else None
+        )
         return _to_response(
             request_id=request_id,
             source=fallback.source,
             model_version=None,
             index_version=None,
             items=fallback.items,
+            experiment=experiment,
         )
 
     # Every tier failed. This is the 503 from ADR-0020 § tier 5.
