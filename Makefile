@@ -65,8 +65,8 @@ test:  ## All tests except load; integration skips if env not set.
 	$(PY) -m pytest -q -m "not load"
 
 .PHONY: test-unit
-test-unit:  ## Unit tests only.
-	$(PY) -m pytest -q -m unit
+test-unit:  ## Unit tests only. `--ff` runs the last failure first.
+	$(PY) -m pytest -q -m unit --ff
 
 .PHONY: test-integration
 test-integration:  ## Integration tests, light tier (postgres/redis). Skips encoder parity.

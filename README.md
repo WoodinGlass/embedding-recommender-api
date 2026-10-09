@@ -427,6 +427,28 @@ make install-hooks        # pre-commit install --install-hooks
 make check                # lint + typecheck + check-markers + unit tests
 ```
 
+**Pre-commit hooks.** `make install-hooks` writes a `pre-commit` hook to
+`.git/hooks/` and downloads the hook environments. On every `git commit`,
+the hooks run ruff (lint + format), mypy, and a small set of
+housekeeping checks (trailing whitespace, YAML/TOML syntax, large
+files). A fixable failure (ruff) is corrected in place and the commit is
+aborted with the fix staged; a non-fixable failure (mypy) aborts and
+prints the reason. `git commit --no-verify` skips the hook for one
+commit; that is the escape hatch, not the workflow.
+
+The ruff version is pinned in three places that must stay equal:
+`pyproject.toml` (what `make lint` uses), `.pre-commit-config.yaml`
+(what the hook uses), and the version CI installs. A commit that passes
+with one ruff and fails with another is a class of failure the project
+already spent time on; the pin removes it. The pin is checked
+mechanically by the lint job.
+
+**In Colab.** Hook environments live in `~/.cache/pre-commit/`, which
+is per-session; the hook itself (`.git/hooks/pre-commit`) persists in
+Drive. The first commit of a new session downloads the environments
+(~30 s); later commits are fast. If you do not plan to commit in this
+session, `make install-hooks` is not required.
+
 Extras are provided so CI and local development do not pay for what they do not use:
 
 | Extra | Contents | When to use |
