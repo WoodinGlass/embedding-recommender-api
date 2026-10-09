@@ -15,7 +15,7 @@ def _key(**overrides: object) -> str:
     base: dict[str, object] = {
         "index_version": "idx-deadbeef",
         "endpoint": "recommend",
-        "k": 10,
+        "k_max": 10,
         "filters": {"category": "books"},
         "seed_item_ids": ["i_1", "i_2"],
     }
@@ -27,24 +27,27 @@ def _key(**overrides: object) -> str:
 # shape
 # ---------------------------------------------------------------- #
 def test_key_has_namespace_version_endpoint_hash() -> None:
+    # ADR-0015 amendment: prefix is recsys:cache so it cannot
+    # collide with the rate limiter (recsys:rl:*).
     key = _key()
     parts = key.split(":")
-    assert parts[0] == "cache"
-    assert parts[1] == "v1"
-    assert parts[2] == "recommend"
-    assert _HEX32.match(parts[3]), f"hash not 32 hex: {parts[3]!r}"
-    assert len(parts) == 4
+    assert parts[0] == "recsys"
+    assert parts[1] == "cache"
+    assert parts[2] == "v1"
+    assert parts[3] == "recommend"
+    assert _HEX32.match(parts[4]), f"hash not 32 hex: {parts[4]!r}"
+    assert len(parts) == 5
 
 
 def test_variant_is_appended_not_hashed() -> None:
     key = _key(variant="control")
     parts = key.split(":")
     assert parts[-1] == "control"
-    assert _HEX32.match(parts[3])
+    assert _HEX32.match(parts[4])
 
 
 def test_no_variant_no_suffix() -> None:
-    assert _key(variant=None).count(":") == 3
+    assert _key(variant=None).count(":") == 4
 
 
 def test_both_endpoints_work() -> None:
@@ -69,7 +72,7 @@ def test_different_endpoint_changes_key() -> None:
 
 
 def test_different_k_changes_key() -> None:
-    assert _key(k=5) != _key(k=10)
+    assert _key(k_max=5) != _key(k_max=10)
 
 
 def test_different_filters_change_key() -> None:
@@ -107,7 +110,7 @@ def test_unknown_endpoint_raises() -> None:
 
 def test_zero_k_raises() -> None:
     with pytest.raises(ValueError, match="k"):
-        _key(k=0)
+        _key(k_max=0)
 
 
 def test_empty_index_version_raises() -> None:

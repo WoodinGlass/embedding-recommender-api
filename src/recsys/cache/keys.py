@@ -45,7 +45,9 @@ from typing import Final
 
 from recsys.security.hashing import blake2b_16
 
-_NAMESPACE: Final[str] = "cache"
+# ADR-0015 amendment: the prefix is namespaced so it cannot
+# collide with the rate limiter (`recsys:rl:*`) on a shared Redis.
+_NAMESPACE: Final[str] = "recsys:cache"
 _SCHEMA_VERSION: Final[str] = "v1"
 
 #: The set of endpoints the key builder accepts. A closed set is a
@@ -59,27 +61,30 @@ def _canonical_payload(
     *,
     index_version: str,
     endpoint: str,
-    k: int,
+    k_max: int,
     filters: Mapping[str, str] | None,
     seed_item_ids: Sequence[str],
 ) -> str:
     """Return a stable JSON encoding of the request.
 
-    ``sort_keys=True`` orders mapping keys; filters are copied to a
-    plain dict first because ``Mapping`` has no ordering guarantee.
-    ``separators`` removes the whitespace ``json.dumps`` adds by
-    default so two logically equal requests produce byte-identical
-    payloads on every Python version. ``ensure_ascii=False`` keeps
-    non-ASCII filter values legible in the payload without affecting
-    the digest.
+    ``k_max`` rather than ``k``: the cache stores a fixed-size
+    candidate window and the handler slices to the request's ``k``
+    (ADR-0015 amendment). A request for k=5 and one for k=20 share
+    one entry, because the answer to the smaller is a prefix of the
+    larger.
+
+    ``seed_item_ids`` are **sorted and deduplicated**. Sorting makes
+    ``[a, b]`` and ``[b, a]`` the same key; deduplication makes
+    ``[a, a, b]`` and ``[a, b]`` the same key. Without either, a
+    client that reorders or repeats seeds produces a permanent miss.
     """
     canonical_filters = dict(sorted((filters or {}).items()))
-    canonical_seeds = sorted(seed_item_ids)
+    canonical_seeds = sorted(set(seed_item_ids))
     return json.dumps(
         {
             "index_version": index_version,
             "endpoint": endpoint,
-            "k": k,
+            "k_max": k_max,
             "filters": canonical_filters,
             "seed_item_ids": canonical_seeds,
         },
@@ -93,28 +98,29 @@ def build_cache_key(
     *,
     index_version: str,
     endpoint: str,
-    k: int,
+    k_max: int,
     filters: Mapping[str, str] | None = None,
     seed_item_ids: Sequence[str] = (),
     variant: str | None = None,
 ) -> str:
     """Return the Redis key for this request.
 
-    The variant suffix is appended only when ``variant`` is not
-    ``None``; a caller that has no experiment running produces the
-    shorter key and does not collide with a variant-aware caller.
+    ``k_max`` (not ``k``) is the candidate window the cache holds;
+    see ``_canonical_payload``. The variant suffix is appended only
+    when ``variant`` is not ``None``; a caller with no experiment
+    running produces the shorter key.
     """
     if endpoint not in ALLOWED_ENDPOINTS:
         raise ValueError(f"endpoint must be one of {sorted(ALLOWED_ENDPOINTS)}, got {endpoint!r}")
-    if k < 1:
-        raise ValueError(f"k must be >= 1, got {k}")
+    if k_max < 1:
+        raise ValueError(f"k_max must be >= 1, got {k_max}")
     if not index_version:
         raise ValueError("index_version must be a non-empty string")
 
     payload = _canonical_payload(
         index_version=index_version,
         endpoint=endpoint,
-        k=k,
+        k_max=k_max,
         filters=filters,
         seed_item_ids=seed_item_ids,
     )

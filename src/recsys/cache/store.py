@@ -82,36 +82,61 @@ class CacheResult:
     """
 
     outcome: CacheLookup
-    items: tuple[tuple[str, float], ...] | None = None
+    items: tuple[tuple[object, ...], ...] | None = None
 
 
-def _serialize(items: Sequence[tuple[str, float]]) -> bytes:
-    """Return a compact, deterministic byte payload for ``items``."""
-    return json.dumps(
-        [[item_id, float(score)] for item_id, score in items],
-        separators=(",", ":"),
-    ).encode("utf-8")
+#: One cached candidate, in the order the cache stores it. The
+#: ``Candidate.vector`` is deliberately absent: ADR-0015 (amended)
+#: skips the cache for MMR-enabled requests because a 384-float
+#: vector per candidate bloats Redis by an order of magnitude. A
+#: future implementation that caches vectors uses a new schema.
+CachedCandidate = tuple[str, float, float, float]  # (id, similarity, popularity, age_days)
 
 
-def _deserialize(raw: bytes) -> tuple[tuple[str, float], ...]:
-    """Parse a cached payload back into ``(item_id, score)`` tuples.
+def _serialize(items: Sequence[tuple[Any, ...]]) -> bytes:
+    """Return a compact, deterministic byte payload for ``items``.
 
-    Raises ``ValueError`` (or ``TypeError`` / ``KeyError`` from the
-    comprehension) if the payload is not a list of pairs. The caller
-    treats that as an ``ERROR`` outcome: a corrupted entry is not a
-    hit and not a miss.
+    Two shapes are accepted. A two-tuple ``(item_id, score)`` is the
+    historical shape (the recommendation *response*, used by the
+    evaluation runner). A four-tuple ``(item_id, similarity,
+    popularity, age_days)`` is the retrieval *candidate* the handler
+    caches so the re-ranker can run on a cache hit.
+
+    A payload mixes one shape per write; ``_deserialize`` reads
+    whichever is present. The row length is the schema tag.
+    """
+    rows: list[list[object]] = []
+    for entry in items:
+        if len(entry) == 2:
+            item_id, score = entry
+            rows.append([item_id, float(score)])
+        elif len(entry) == 4:
+            item_id, similarity, popularity, age_days = entry
+            rows.append([item_id, float(similarity), float(popularity), float(age_days)])
+        else:
+            raise ValueError(f"cache payload entry must have 2 or 4 fields, got {len(entry)}")
+    return json.dumps(rows, separators=(",", ":")).encode("utf-8")
+
+
+def _deserialize(raw: bytes) -> tuple[tuple[object, ...], ...]:
+    """Parse a cached payload back into tuples of the stored shape.
+
+    Returns tuples whose length matches what was written. The caller
+    distinguishes a two-tuple (a response) from a four-tuple (a
+    candidate). Raises ``ValueError`` / ``TypeError`` / ``KeyError``
+    on a malformed payload; the caller treats that as an ``ERROR``
+    outcome, not a hit.
     """
     parsed = json.loads(raw)
     if not isinstance(parsed, list):
         raise ValueError("cache payload is not a list")
-    out: list[tuple[str, float]] = []
+    out: list[tuple[object, ...]] = []
     for entry in parsed:
-        if not isinstance(entry, list) or len(entry) != 2:
-            raise ValueError("cache payload entry is not a [id, score] pair")
-        item_id, score = entry
-        if not isinstance(item_id, str):
+        if not isinstance(entry, list) or len(entry) not in (2, 4):
+            raise ValueError("cache payload entry is not a 2- or 4-tuple")
+        if not isinstance(entry[0], str):
             raise ValueError("cache payload item id is not a string")
-        out.append((item_id, float(score)))
+        out.append(tuple(entry))
     return tuple(out)
 
 

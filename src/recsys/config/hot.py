@@ -118,6 +118,9 @@ class CacheSection:
     recommend_ttl_seconds: int
     similar_ttl_seconds: int
     negative_ttl_seconds: int
+    #: Number of candidates the cache stores (ADR-0015 amendment:
+    #: k_max, not k). Sliced to the request's k at serve time.
+    cache_k_max: int
 
 
 @dataclass(frozen=True)
@@ -150,6 +153,7 @@ _DEFAULT = HotConfig(
         enable_mmr=False,
     ),
     cache=CacheSection(
+        cache_k_max=100,
         recommend_ttl_seconds=300,
         similar_ttl_seconds=600,
         negative_ttl_seconds=30,
@@ -197,9 +201,13 @@ def _section(node: Any, name: str) -> dict[str, Any]:
     return node
 
 
-def _int_field(node: dict[str, Any], name: str, *, minimum: int = 0) -> int:
+def _int_field(
+    node: dict[str, Any], name: str, *, minimum: int = 0, default: int | None = None
+) -> int:
     if name not in node:
-        raise HotConfigError(f"hot config field {name!r} is required")
+        if default is None:
+            raise HotConfigError(f"hot config field {name!r} is required")
+        return default
     value = node[name]
     if not isinstance(value, int) or isinstance(value, bool):
         raise HotConfigError(
@@ -289,6 +297,7 @@ def load_hot_config(path: Path) -> HotConfig:
             enable_mmr=_bool_field(rr, "enable_mmr"),
         ),
         cache=CacheSection(
+            cache_k_max=_int_field(ch, "cache_k_max", minimum=1, default=100),
             recommend_ttl_seconds=_int_field(ch, "recommend_ttl_seconds", minimum=0),
             similar_ttl_seconds=_int_field(ch, "similar_ttl_seconds", minimum=0),
             negative_ttl_seconds=_int_field(ch, "negative_ttl_seconds", minimum=0),

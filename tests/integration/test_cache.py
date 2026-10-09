@@ -51,7 +51,7 @@ def _store(redis_url: str) -> CacheStore:
 # happy path
 # ---------------------------------------------------------------- #
 def test_roundtrip(redis_url: str) -> None:
-    async def main() -> tuple[CacheLookup, tuple[tuple[str, float], ...] | None]:
+    async def main() -> tuple[CacheLookup, tuple[tuple[object, ...], ...] | None]:
         store = _store(redis_url)
         key = _key()
         try:
