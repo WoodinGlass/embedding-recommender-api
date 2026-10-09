@@ -44,6 +44,13 @@ api = [
   "pydantic>=2.8,<3.0",
   "pydantic-settings>=2.4,<3.0",
   "python-multipart>=0.0.9",
+  # anyio is a direct dependency of the request path: the handler
+  # offloads synchronous work to a bounded thread pool via
+  # anyio.to_thread.run_sync(..., limiter=CapacityLimiter(N)) and
+  # bounds the request with anyio.fail_after. asyncio.to_thread
+  # has no limiter; the bound is what keeps a slow dependency from
+  # saturating every worker thread. See ADR-0012 (amended).
+  "anyio>=4.4,<5.0",
 ]
 db = [
   "sqlalchemy>=2.0,<3.0",

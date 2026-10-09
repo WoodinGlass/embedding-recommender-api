@@ -190,3 +190,25 @@ RERANK_MMR_ACTIVE_TOTAL = Counter(
     labelnames=("active",),  # true | false
     registry=REGISTRY,
 )
+
+# ------------------------------------------------------------------ #
+# request lifecycle (ADR-0012 amendment, M3.6.6)
+# ------------------------------------------------------------------ #
+ENCODER_MISSING_TOTAL = Counter(
+    "recsys_encoder_missing_total",
+    "Requests that ran without an encoder, by environment.",
+    labelnames=("env",),  # dev | staging | prod
+    registry=REGISTRY,
+)
+
+THREAD_POOL_WAITING = Gauge(
+    "recsys_thread_pool_waiting",
+    "Coroutines waiting for a synchronous worker thread.",
+    registry=REGISTRY,
+)
+
+THREAD_POOL_ACTIVE = Gauge(
+    "recsys_thread_pool_active",
+    "Synchronous worker threads currently running a request.",
+    registry=REGISTRY,
+)

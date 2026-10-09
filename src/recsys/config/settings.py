@@ -206,6 +206,24 @@ class Settings(BaseSettings):
     popularity_cache_path: str = "artifacts/popularity/snapshot.json"
 
     # ------------------------------------------------------------------ #
+    # request lifecycle (ADR-0012 amendment, M3.6.6)
+    # ------------------------------------------------------------------ #
+    #: Maximum number of synchronous worker threads the request path may
+    #: occupy at once. The handler is ``async def`` and offloads the
+    #: synchronous pipeline (encode, ANN, rerank) to a bounded thread
+    #: pool; the bound is what keeps a slow dependency from saturating
+    #: every thread and queuing healthy requests behind it. The default
+    #: assumes a database pool of 10 (``db_pool_size * 2``); a smaller
+    #: pool wants a smaller limit. See ADR-0012 (amended).
+    sync_thread_limit: int = Field(default=20, ge=1, le=200)
+    #: Per-request wall-clock budget for the synchronous pipeline. A
+    #: request that exceeds this is cancelled by the caller and served
+    #: from the fallback chain (ADR-0020) rather than making every
+    #: waiting client pay the same latency. The default is the ADR-0024
+    #: latency SLO plus a small margin.
+    request_timeout_seconds: float = Field(default=0.25, gt=0, le=10.0)
+
+    # ------------------------------------------------------------------ #
     # deployment (ADR-0023)
     # ------------------------------------------------------------------ #
     pre_stop_delay_seconds: int = Field(default=5, ge=0)

@@ -27,6 +27,9 @@ def test_contracts_file_exists() -> None:
         "recsys_cache_write_errors_total",
         "recsys_circuit_breaker_trips_total",
         "recsys_rerank_mmr_active_total",
+        "recsys_thread_pool_active",
+        "recsys_thread_pool_waiting",
+        "recsys_encoder_missing_total",
         "recsys_rerank_signal_missing_total",
         "recsys_rerank_skipped_total",
         "recsys_rerank_failures_total",
@@ -68,5 +71,8 @@ def test_metric_objects_exposed() -> None:
     assert metrics.RERANK_SKIPPED_TOTAL is not None
     assert metrics.RERANK_SIGNAL_MISSING_TOTAL is not None
     assert metrics.RERANK_MMR_ACTIVE_TOTAL is not None
+    assert metrics.ENCODER_MISSING_TOTAL is not None
+    assert metrics.THREAD_POOL_WAITING is not None
+    assert metrics.THREAD_POOL_ACTIVE is not None
     assert metrics.RATE_LIMIT_REMAINING is not None
     assert metrics.RATE_LIMIT_LUA_ERRORS_TOTAL is not None

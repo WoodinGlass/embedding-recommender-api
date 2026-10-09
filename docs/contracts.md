@@ -849,6 +849,9 @@ not listed here is a contract violation caught by
 | `recsys_rerank_skipped_total` | counter | `reason` | `reason` ∈ `no_vectors`/`k_below_min` (ADR-0016) |
 | `recsys_rerank_signal_missing_total` | counter | `signal` | `signal` ∈ `popularity`/`recency` (ADR-0016) |
 | `recsys_rerank_mmr_active_total` | counter | `active` | `active` ∈ `true`/`false` (ADR-0016) |
+| `recsys_encoder_missing_total` | counter | `env` | Requests that ran without an encoder, by environment (ADR-0012 amendment) |
+| `recsys_thread_pool_waiting` | gauge | — | Coroutines waiting for a synchronous worker thread (ADR-0012 amendment) |
+| `recsys_thread_pool_active` | gauge | — | Synchronous worker threads currently running a request (ADR-0012 amendment) |
 | `recsys_rate_limit_hits_total` | counter | `class_name`, `result` | `result` ∈ `allowed`/`limited` (ADR-0014) |
 | `recsys_rate_limit_remaining` | histogram | `class_name` | Tokens left at decision time (ADR-0014) |
 | `recsys_rate_limit_degraded` | gauge | — | `1` when the per-instance fallback limiter is active (ADR-0014) |
