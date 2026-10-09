@@ -510,9 +510,197 @@ async def recommend(
     response_model=RecommendResponse,
     summary="Item-to-item similarity",
 )
-async def similar(item_id: str, principal: PrincipalDep) -> RecommendResponse:
-    del principal  # auth only; the handler is a stub until M3.6.6e
+async def similar(
+    item_id: str,
+    request: Request,
+    principal: PrincipalDep,
+    request_id: RequestIdDep,
+    encoder: EncoderDep,
+    hot: HotConfigDep,
+    cache: CacheStoreDep,
+    settings: SettingsDep,
+) -> RecommendResponse:
+    """Top-k items similar to ``item_id``.
+
+    Same pipeline as ``/v1/recommend`` with the seed being one item
+    and no experiment participation (ADR-0017 does not define an
+    item-scoped experiment; the response's ``meta.experiment`` is
+    always null, per the K4 decision in the M3.6 brief).
+
+    Cache: same tier-1 lookup as ``/v1/recommend``, keyed on
+    endpoint='similar' so the two do not share entries (their
+    candidate windows and TTLs differ; ADR-0015).
+    """
+    del principal  # consumed by the auth dependency
+    limiter: anyio.CapacityLimiter = request.app.state.thread_limiter
+
+    cfg = hot.get().rerank.to_rerank_config()
+    reranker = WeightedBlendReranker(cfg)
+    active_index_version = getattr(request.app.state, "active_index", None)
+
+    # The MMR skip and the no-active-index skip both apply, exactly
+    # as in /v1/recommend (ADR-0015 amendment).
+    cache_skip = cfg.enable_mmr or active_index_version is None
+    cache_key: str | None = None
+    if not cache_skip and active_index_version is not None:
+        if cfg.enable_mmr:
+            from recsys.monitoring.metrics import CACHE_SKIP_TOTAL
+
+            CACHE_SKIP_TOTAL.labels(reason="mmr_enabled").inc()
+        cache_key = build_cache_key(
+            index_version=active_index_version,
+            endpoint="similar",
+            k_max=hot.get().cache.cache_k_max,
+            filters=None,
+            seed_item_ids=[item_id],
+            variant=None,
+        )
+        lookup = await cache.lookup(cache_key)
+        if lookup.outcome is CacheLookup.HIT and lookup.items:
+            cached = _candidates_from_cache(lookup.items)
+            if cached:
+                call = partial(
+                    sync_rerank,
+                    candidates=cached,
+                    reranker=reranker,
+                    k=10,  # the contract's default; similar has no k parameter
+                    seed_item_ids=[item_id],
+                    index_version=active_index_version,
+                    model_version=str(getattr(encoder, "model_version", "")),
+                    missing_signals=frozenset(),
+                )
+                try:
+                    rerank_result: (
+                        PipelineResult | PipelineFailure
+                    ) = await anyio.to_thread.run_sync(call, limiter=limiter)
+                except Exception:
+                    rerank_result = PipelineFailure("ann_error", detail="similar cache hit failed")
+                if isinstance(rerank_result, PipelineResult):
+                    return _to_response(
+                        request_id=request_id,
+                        source="cache",
+                        model_version=rerank_result.model_version,
+                        index_version=rerank_result.index_version,
+                        items=rerank_result.items,
+                        experiment=None,
+                    )
+
+    # Miss path (or skip path): retrieve + rerank on a worker thread.
+    pool = request.app.state.db_pool
+    try:
+        pool_ctx = pool.connection()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "unavailable",
+                "message": f"pool unavailable: {type(exc).__name__}",
+                "request_id": request_id,
+            },
+        ) from None
+
+    try:
+        with pool_ctx as conn:
+            recency_provider = PgRecencyProvider(
+                conn, timeout_seconds=settings.request_timeout_seconds
+            )
+            popularity_provider = SyntheticPopularityProvider()
+            miss_call = partial(
+                sync_retrieve_and_rerank,
+                connection=conn,
+                encoder=encoder,  # type: ignore[arg-type]
+                seed_item_ids=[item_id],
+                k=10,
+                filters=None,
+                rerank_config=cfg,
+                reranker=reranker,
+                popularity_provider=popularity_provider,
+                recency_provider=recency_provider,
+                hnsw_ef_search=settings.hnsw_ef_search,
+                active_index_version=active_index_version,
+                pgvector_version=getattr(request.app.state, "pgvector_version", None),
+            )
+            try:
+                with anyio.fail_after(settings.request_timeout_seconds):
+                    outcome: RetrievalOutcome = await anyio.to_thread.run_sync(
+                        miss_call, limiter=limiter
+                    )
+            except TimeoutError:
+                outcome = RetrievalOutcome(
+                    result=PipelineFailure("ann_error", detail="similar timeout"),
+                    candidates=None,
+                )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "unavailable",
+                "message": f"{type(exc).__name__}: {exc}"[:200],
+                "request_id": request_id,
+            },
+        ) from None
+
+    # Store on the miss path.
+    if cache_key is not None and outcome.candidates and isinstance(outcome.result, PipelineResult):
+        rows = tuple(
+            (c.item_id, c.similarity, c.popularity, c.age_days) for c in outcome.candidates
+        )
+        ttl = hot.get().cache.similar_ttl_seconds
+        await cache.store(cache_key, rows, ttl_seconds=jittered_ttl(ttl))
+
+    if isinstance(outcome.result, PipelineResult):
+        return _to_response(
+            request_id=request_id,
+            source="ann",
+            model_version=outcome.result.model_version,
+            index_version=outcome.result.index_version,
+            items=outcome.result.items,
+            experiment=None,
+        )
+
+    # Client error: item has no embedding / does not exist.
+    if outcome.result.reason == "all_seeds_missing":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "not_found",
+                "message": f"item {item_id!r} not found or not embedded",
+                "request_id": request_id,
+            },
+        )
+    if outcome.result.reason == "empty_seeds":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "bad_request",
+                "message": "item_id must be non-empty",
+                "request_id": request_id,
+            },
+        )
+
+    # Server-side failure: try the fallback chain.
+    fallback = await _run_fallback(
+        pool=request.app.state.db_pool,
+        popularity_cache=request.app.state.popularity_cache,
+        limiter=limiter,
+        k=10,
+        filters=None,
+    )
+    if fallback is not None:
+        return _to_response(
+            request_id=request_id,
+            source=fallback.source,
+            model_version=None,
+            index_version=None,
+            items=fallback.items,
+            experiment=None,
+        )
+
     raise HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail=f"Item-to-item similarity for {item_id!r} lands in M3.6.6e.",
+        detail={
+            "code": "unavailable",
+            "message": f"no tier produced results: {outcome.result.reason}",
+            "request_id": request_id,
+        },
     )
