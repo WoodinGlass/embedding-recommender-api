@@ -129,7 +129,15 @@ service = [
 # ML runtime (torch/sentence-transformers) or the pipelines. CI uses this for
 # the fast gates so a PR does not wait on a ~800 MB download.
 dev-lite = [
-  "embedding-recommender-api[api,auth,observability]",
+  # cache is included so mypy sees redis-py's real signatures when
+  # it type-checks the limiter and the cache store. Without it, the
+  # import in those modules resolves to Any, the call is not checked,
+  # and a `# type: ignore[no-untyped-call]` on the redis call becomes
+  # an "unused ignore" error in the lint job. That is a class of
+  # failure that only shows up in CI; the extra keeps the two
+  # environments consistent. redis-py has no compiled extension, so
+  # the install cost is negligible.
+  "embedding-recommender-api[api,auth,cache,observability]",
   # tests
   "pytest>=8.3,<9.0",
   "pytest-asyncio>=0.24,<1.0",
