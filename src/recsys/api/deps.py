@@ -10,8 +10,14 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request, status
 
+from recsys.api.auth import (
+    JwtError,
+    Principal,
+    validate_api_key,
+    validate_jwt,
+)
 from recsys.cache import CacheStore
 from recsys.config.hot import HotConfigStore
 from recsys.config.settings import Settings, get_settings
@@ -78,6 +84,76 @@ def get_encoder(request: Request) -> object | None:
     return getattr(request.app.state, "encoder", None)
 
 
+def _unauthorized(request: Request, message: str) -> HTTPException:
+    """Build the 401 the auth dependency raises.
+
+    The shape matches the handler's client errors (``detail`` is a
+    dict with ``code``, ``message``, ``request_id``) so a client sees
+    one envelope for every 4xx. The credential, when present, is
+    never in the message: ADR-0013 forbids it.
+    """
+    request_id = str(getattr(request.state, "request_id", ""))
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={
+            "code": "unauthenticated",
+            "message": message,
+            "request_id": request_id,
+        },
+    )
+
+
+def get_principal(request: Request) -> Principal:
+    """Validate the request's credential and return a :class:`Principal`.
+
+    Two credential models are accepted (ADR-0013):
+
+    - ``X-API-Key: <key>`` — an Argon2id-hashed entry (or plaintext in
+      dev). The key list lives in ``settings.api_key_set`` /
+      ``settings.api_key_admin_set``.
+    - ``Authorization: Bearer <jwt>`` — validated against
+      ``settings.jwt_secret``, ``settings.jwt_algorithm``, and
+      ``settings.jwt_max_age_seconds``.
+
+    When both headers are present, the API key is tried first: it is
+    the cheaper validation and the one the deployment configures by
+    default. A request with neither, or with a credential that fails
+    validation, is a 401.
+
+    The settings come from ``request.app.state.settings`` rather than
+    ``get_settings()`` because the app factory may have been built
+    with an explicit ``Settings`` instance (tests, embedded callers);
+    the dependency must see that instance, not the process default.
+    """
+    settings: Settings = request.app.state.settings
+
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key:
+        principal = validate_api_key(
+            api_key,
+            read_entries=settings.api_key_set,
+            admin_entries=settings.api_key_admin_set,
+        )
+        if principal is None:
+            raise _unauthorized(request, "invalid API key")
+        return principal
+
+    authorization = request.headers.get("Authorization", "")
+    if authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        try:
+            return validate_jwt(
+                token,
+                secret=settings.jwt_secret,
+                algorithm=settings.jwt_algorithm,
+                max_age_seconds=settings.jwt_max_age_seconds,
+            )
+        except JwtError as exc:
+            raise _unauthorized(request, f"invalid JWT: {exc.reason}") from None
+
+    raise _unauthorized(request, "no credential presented")
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 RequestIdDep = Annotated[str, Depends(get_request_id)]
 LimiterDep = Annotated[TokenBucketLimiter, Depends(get_limiter)]
@@ -88,3 +164,4 @@ ExperimentsDep = Annotated[ExperimentsFile, Depends(get_experiments)]
 DbPoolDep = Annotated[object, Depends(get_db_pool)]
 PopularityCacheDep = Annotated[PopularityCache, Depends(get_popularity_cache)]
 EncoderDep = Annotated[object | None, Depends(get_encoder)]
+PrincipalDep = Annotated[Principal, Depends(get_principal)]
