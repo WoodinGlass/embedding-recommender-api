@@ -309,15 +309,27 @@ jobs:
         run: |
           set -euo pipefail
 
-          # The container runs with APP_ENV=prod, which activates the prod
-          # guard in Settings (docs/adr/0013, docs/contracts.md section 3.1):
-          # API_KEYS must be an Argon2id hash (plaintext is dev-only),
-          # JWT_SECRET must be >= 32 chars and not the sentinel,
-          # USER_ID_HASH_SALT must be set and its version >= 1.
-          # The hash below is a real Argon2id hash for the literal key
-          # "ci-smoke-key"; it is a CI fixture, not a production secret.
+          # The container runs with APP_ENV=dev. This is a smoke test:
+          # "the image builds, the container starts, /healthz, /readyz,
+          # and /metrics answer". It is not a deployment, and the prod
+          # behavior (Settings' prod guard, the encoder fail-fast in
+          # `_build_encoder`) belongs to the unit tests that exercise
+          # those code paths directly (`tests/unit/test_settings.py`
+          # covers the prod guard; `tests/unit/test_readyz.py` covers
+          # the encoder check). Running the container in prod mode here
+          # would require an ONNX artifact the image does not ship (it
+          # is a deployment artifact, not a build artifact); the smoke
+          # test would then be testing the artifact pipeline, not the
+          # image.
+          #
+          # The API_KEYS entry below is a real Argon2id hash of the
+          # literal key "ci-smoke-key"; it is a CI fixture, not a
+          # production secret. It is left in place because the dev
+          # guard does not enforce it, and its presence keeps the
+          # command identical to the one a developer would run locally
+          # with an Argon2id key from `.env`.
           docker run -d --name recsys-ci \
-            -e APP_ENV=prod \
+            -e APP_ENV=dev \
             -e API_KEYS='$argon2id$v=19$m=65536,t=3,p=4$f48R4vy/N6bUuleK8T6HMA$IoErucGQGhmYbEoTEvEzLm5uI+97gyTMvPAVpN39f9E' \
             -e JWT_SECRET=ci-smoke-secret-not-the-default-and-long-enough \
             -e USER_ID_HASH_SALT=ci-smoke-salt-not-the-default-value \
