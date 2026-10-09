@@ -20,6 +20,7 @@ from recsys.experiments.loader import (
     ExperimentStatus,
     load_experiments,
 )
+from recsys.experiments.runtime import run_experiments_for_request
 
 __all__ = [
     "BUCKET_SPACE",
@@ -35,5 +36,6 @@ __all__ = [
     "compute_bucket",
     "effective_salt",
     "load_experiments",
+    "run_experiments_for_request",
     "write_exposure",
 ]

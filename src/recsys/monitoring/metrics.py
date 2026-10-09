@@ -84,6 +84,14 @@ EXPERIMENT_EXPOSURES = Counter(
     registry=REGISTRY,
 )
 
+EXPERIMENT_EXPOSURE_ERRORS = Counter(
+    "recsys_experiment_exposure_errors_total",
+    "Exposure writes that raised, by exception type.",
+    labelnames=("type",),
+    registry=REGISTRY,
+)
+
+
 RATE_LIMIT_DEGRADED = Gauge(
     "recsys_rate_limit_degraded",
     "1 when the shared Redis rate limiter is unavailable.",
