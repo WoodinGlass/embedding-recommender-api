@@ -226,7 +226,12 @@ class TokenBucketLimiter:
         if self._redis is None:
             import redis.asyncio as aioredis
 
-            self._redis = aioredis.from_url(
+            # redis-py 5.x declares ``from_url`` with ``**kwargs: Any``;
+            # mypy strict reports the call as untyped. The parameters
+            # passed below are the ones redis-py documents; the cast is
+            # not needed because the return value is stored on an
+            # ``Any`` field.
+            self._redis = aioredis.from_url(  # type: ignore[no-untyped-call]
                 self._redis_url,
                 decode_responses=False,
                 socket_timeout=0.05,

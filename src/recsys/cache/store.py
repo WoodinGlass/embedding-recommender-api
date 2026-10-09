@@ -256,7 +256,10 @@ class CacheStore:
             return
         import redis.asyncio as aioredis
 
-        self._redis = aioredis.from_url(
+        # See ``limiter.py`` for why this call carries a mypy
+        # suppression: redis-py 5.x declares ``from_url`` with
+        # ``**kwargs: Any``, which mypy strict reports as untyped.
+        self._redis = aioredis.from_url(  # type: ignore[no-untyped-call]
             self._redis_url,
             decode_responses=False,
             socket_timeout=self._socket_timeout,

@@ -44,7 +44,25 @@ class ExperimentAssignment(BaseModel):
 class RecommendMeta(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    source: Literal["cache", "ann", "fallback"]
+    #: The data path that produced this list. The five values are
+    #: defined by ADR-0020 § meta.source reflects the tier. A client
+    #: that switches on `source` should treat `fallback_ann` and
+    #: `fallback_cached` as "the recommendation is popular, not
+    #: personalized"; their scores are a placeholder in (0, 1] and are
+    #: not comparable to an ANN score.
+    #: The data path that produced this list. The five values are
+    #: defined by ADR-0020 § meta.source reflects the tier. A client
+    #: that switches on `source` should treat `fallback_ann` and
+    #: `fallback_cached` as "the recommendation is popular, not
+    #: personalized"; their scores are a placeholder in (0, 1] and are
+    #: not comparable to an ANN score.
+    source: Literal[
+        "cache",
+        "ann",
+        "fallback_ann",
+        "fallback_cached",
+        "none",
+    ]
     model_version: str
     index_version: str
     experiment: ExperimentAssignment | None = None
