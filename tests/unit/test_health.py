@@ -8,14 +8,37 @@ import pytest
 from fastapi.testclient import TestClient
 
 from recsys.api.app import create_app
+from recsys.config.enums import AppEnv
+from recsys.config.settings import Settings
+
+#: The API key the authed_client fixture sends.
+_TEST_API_KEY = "test-api-key"
+
+
+def _settings() -> Settings:
+    return Settings(app_env=AppEnv.DEV, api_keys=_TEST_API_KEY)
 
 
 @pytest.fixture
 def client() -> Iterator[TestClient]:
-    # The `with` block runs the lifespan; without it, the app
-    # state (hot_config, db_pool, encoder, ...) is never set and
-    # every dependency that reads it raises AttributeError.
-    with TestClient(create_app()) as c:
+    """Unauthenticated client.
+
+    The `with` block runs the lifespan; without it, the app
+    state (hot_config, db_pool, encoder, ...) is never set and
+    every dependency that reads it raises AttributeError.
+
+    This client sends no credential; use it for /healthz,
+    /readyz, /metrics, and the tests that expect a 401.
+    """
+    with TestClient(create_app(_settings())) as c:
+        yield c
+
+
+@pytest.fixture
+def authed_client() -> Iterator[TestClient]:
+    """Client with a valid X-API-Key. Use for tests that exercise
+    the endpoint's own validation, not the auth dependency."""
+    with TestClient(create_app(_settings()), headers={"X-API-Key": _TEST_API_KEY}) as c:
         yield c
 
 
@@ -73,8 +96,8 @@ def test_events_stub_returns_503(client: TestClient) -> None:
     assert r.status_code == 503
 
 
-def test_recommend_rejects_unknown_filter(client: TestClient) -> None:
-    r = client.post(
+def test_recommend_rejects_unknown_filter(authed_client: TestClient) -> None:
+    r = authed_client.post(
         "/v1/recommend",
         json={
             "user_id": "u_1",
@@ -87,25 +110,16 @@ def test_recommend_rejects_unknown_filter(client: TestClient) -> None:
     assert r.status_code == 422
 
 
-def test_recommend_rejects_k_out_of_range(client: TestClient) -> None:
-    r = client.post(
+def test_recommend_rejects_k_out_of_range(authed_client: TestClient) -> None:
+    r = authed_client.post(
         "/v1/recommend",
         json={"user_id": "u_1", "seed_item_ids": ["i_seed"], "k": 9999},
     )
     assert r.status_code == 422
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="auth is not wired to /v1/recommend yet; wired in M3.6.6b.3",
-)
 def test_recommend_requires_auth(client: TestClient) -> None:
-    """No API key must be rejected with 401.
-
-    Currently the handler returns 503 (dependency failure). This
-    test documents the gap rather than passing vacuously. Remove
-    the xfail marker when M3.6.6b.3 wires auth to the router.
-    """
+    """No credential: the auth dependency rejects before the handler runs."""
     r = client.post(
         "/v1/recommend",
         json={"user_id": "u_1", "seed_item_ids": ["i_seed"], "k": 2},

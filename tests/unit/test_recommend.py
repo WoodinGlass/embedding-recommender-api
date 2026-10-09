@@ -28,6 +28,9 @@ from recsys.api.pipeline import PipelineFailure, PipelineResult
 from recsys.config.enums import AppEnv
 from recsys.config.settings import Settings
 
+#: The API key every TestClient in this module sends.
+_TEST_API_KEY = "test-api-key"
+
 
 # ---------------------------------------------------------------- #
 # helpers
@@ -36,6 +39,9 @@ def _settings(**overrides: object) -> Settings:
     base: dict[str, object] = {
         "app_env": AppEnv.DEV,
         "request_timeout_seconds": 1.0,
+        # The router requires a credential; the clients below send
+        # this key on every request.
+        "api_keys": _TEST_API_KEY,
     }
     base.update(overrides)
     return Settings(**base)  # type: ignore[arg-type]
@@ -123,7 +129,10 @@ class TestHandlerWiring:
         monkeypatch.setattr(app_module, "_build_db_pool", lambda _settings: _FakePool(_FakeConn()))
         monkeypatch.setattr(app_module, "_build_encoder", lambda _settings, _log: _FakeEncoder())
         app = create_app(_settings())
-        return TestClient(app)
+        # Every request authenticates; the test bodies do not spell
+        # out the header because the endpoint under test is not the
+        # auth dependency (see tests/unit/test_auth_dependency.py).
+        return TestClient(app, headers={"X-API-Key": _TEST_API_KEY})
 
     def test_happy_path_returns_200_with_items(self, monkeypatch: pytest.MonkeyPatch) -> None:
         client = self._client_with_mock(
@@ -248,7 +257,7 @@ class TestHandlerWithFakeCollaborators:
         )
         monkeypatch.setattr(app_module, "_build_encoder", lambda _settings, _log: _FakeEncoder())
         app = create_app(_settings())
-        return TestClient(app)
+        return TestClient(app, headers={"X-API-Key": _TEST_API_KEY})
 
     def test_happy_path_uses_real_pipeline(self, monkeypatch: pytest.MonkeyPatch) -> None:
         client = self._client(monkeypatch)

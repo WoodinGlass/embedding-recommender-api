@@ -25,6 +25,7 @@ from recsys.api.deps import (
     EncoderDep,
     ExperimentsDep,
     HotConfigDep,
+    PrincipalDep,
     RequestIdDep,
     SettingsDep,
 )
@@ -156,6 +157,7 @@ async def _run_pipeline(
 async def recommend(
     body: RecommendRequest,
     request: Request,
+    principal: PrincipalDep,
     request_id: RequestIdDep,
     encoder: EncoderDep,
     hot: HotConfigDep,
@@ -172,6 +174,10 @@ async def recommend(
     chain replaces that response in M3.6.6c.
     """
     del cache, experiments  # used in 6c/6d; declared now for a stable signature
+    # `principal` is consumed by FastAPI before this function
+    # runs: the auth dependency validates the credential. The
+    # value is unused until M3.6.6d logs the exposure.
+    del principal
     limiter: anyio.CapacityLimiter = request.app.state.thread_limiter
 
     result = await _run_pipeline(
@@ -237,7 +243,8 @@ async def recommend(
     response_model=RecommendResponse,
     summary="Item-to-item similarity",
 )
-async def similar(item_id: str) -> RecommendResponse:
+async def similar(item_id: str, principal: PrincipalDep) -> RecommendResponse:
+    del principal  # auth only; the handler is a stub until M3.6.6e
     raise HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         detail=f"Item-to-item similarity for {item_id!r} lands in M3.6.6e.",
