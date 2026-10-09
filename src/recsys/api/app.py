@@ -109,6 +109,62 @@ def _build_popularity_cache(settings: Settings, log: object) -> PopularityCache:
         return PopularityCache.empty()
 
 
+def _build_encoder(settings: Settings, log: object) -> object:
+    """Build the ONNX encoder or return ``None``.
+
+    The ONNX artifact is a **derived** file (`make export_onnx`), not a
+    committed configuration file. A fresh checkout has never run the
+    export, so "missing" is a normal state in dev and test: the ANN
+    tier is unavailable and the fallback chain serves popular items
+    (ADR-0020). In prod, missing is a deployment error — an image was
+    built without the artifact, or the artifact directory is mislaid —
+    and the process refuses to start rather than silently degrading
+    relevance for the life of the deployment. The check is
+    `settings.app_env is AppEnv.PROD`.
+
+    The first inference on a fresh session is materially slower than
+    the second (JIT, memory allocation for the arena, page faults on
+    the weights). A single warmup call at build time absorbs that cost
+    so the first client does not pay it. A warmup that raises means the
+    session cannot run inference at all, which is the same condition as
+    a missing artifact for the purposes of the fallback chain: the
+    encoder is not usable.
+    """
+    try:
+        from recsys.embeddings.encoder import OnnxEncoder
+
+        # A label derived from the model name; the artifact's SHA prefix
+        # is appended by the encoder itself. The composition matches the
+        # `<label>+<sha8>` format `docs/contracts.md` § 1.3 fixes.
+        model_label = settings.embedding_model.rsplit("/", 1)[-1].lower()
+        encoder = OnnxEncoder(
+            Path(settings.embedding_onnx_path),
+            label=model_label,
+            intra_op_threads=1,
+            inter_op_threads=1,
+        )
+        # Warmup. See the docstring.
+        encoder.encode(["warmup"])
+        log.info(  # type: ignore[attr-defined]
+            "encoder.loaded",
+            model_version=encoder.model_version,
+            path=str(settings.embedding_onnx_path),
+        )
+        return encoder
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        if settings.app_env is AppEnv.PROD:
+            raise RuntimeError(
+                f"encoder required in production but not usable: {type(exc).__name__}: {exc}"
+            ) from exc
+        log.warning(  # type: ignore[attr-defined]
+            "encoder.unavailable",
+            error=type(exc).__name__,
+            message=str(exc)[:200],
+            path=str(settings.embedding_onnx_path),
+        )
+        return None
+
+
 def _build_experiments(settings: Settings, log: object) -> ExperimentsFile:
     """Load ``experiments.yaml``; in prod a missing file is fatal.
 
@@ -187,6 +243,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     experiments_file = _build_experiments(settings, log)
     db_pool = _build_db_pool(settings)
     popularity_cache = _build_popularity_cache(settings, log)
+    encoder = _build_encoder(settings, log)
+    if encoder is None:
+        from recsys.monitoring.metrics import ENCODER_MISSING_TOTAL
+
+        ENCODER_MISSING_TOTAL.labels(env=settings.app_env.value).inc()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -197,6 +258,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.experiments = experiments_file
         app.state.db_pool = db_pool
         app.state.popularity_cache = popularity_cache
+        app.state.encoder = encoder
         # Open the pool here, not in ``_build_db_pool``: a failure to
         # connect is a readiness problem (ADR-0019), not a startup one.
         # The pool object stays on state even when its open fails; a
