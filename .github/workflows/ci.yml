@@ -60,6 +60,33 @@ jobs:
         run: make check-ruff-version
 
   # ---------------------------------------------------------------------------
+  # Import graph — the fast contract test (30 s)
+  #
+  # Runs a fresh Python process for each light module and asserts it does
+  # not pull numpy, psycopg, or redis transitively. This is the check
+  # that would have caught the M3.6 import-chain regressions at commit
+  # time instead of after the unit and integration jobs failed.
+  # ---------------------------------------------------------------------------
+  test-imports:
+    name: import graph
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev-lite]"
+      - name: Run import-graph tests
+        run: python -m pytest -q -m unit tests/unit/test_import_graph.py
+
+  # ---------------------------------------------------------------------------
   # Unit tests — matrix on the versions README claims to support
   # ---------------------------------------------------------------------------
   test-unit:

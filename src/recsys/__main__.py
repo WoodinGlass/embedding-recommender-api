@@ -14,7 +14,11 @@ import uvicorn
 def main() -> None:
     """Entry point for ``python -m recsys``."""
     uvicorn.run(
-        "recsys.api.app:app",
+        # Factory target. `app.py` deliberately does not build the app
+        # at module scope; the entrypoint is where the side effects
+        # belong. See the note in that module for why.
+        "recsys.api.app:create_app",
+        factory=True,
         # Bind all interfaces: required for container ingress. Auth and rate
         # limiting are enforced by middleware, not by the bind address.
         host="0.0.0.0",  # noqa: S104

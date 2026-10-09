@@ -256,4 +256,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+# NOTE: no `app = create_app()` at module scope. The factory is
+# the entrypoint, not the built app: `uvicorn
+# recsys.api.app:create_app --factory` calls it, the Dockerfile
+# CMD (`python -m recsys`) calls it through `__main__`, and a
+# test that imports this module just to reach `create_app` does
+# not pay for the app being built as a side effect of the
+# import. Building the app requires a database URL, a Redis URL,
+# and the serving extras; those belong to the entrypoint, not to
+# every module that touches `recsys.api`.

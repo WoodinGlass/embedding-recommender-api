@@ -787,6 +787,42 @@ variables only. They are never in a committed file, a hot config, a
 database row, or a log line (ADR-0021 § Logs, ADR-0022 § Secrets).
 
 
+### 3.3 Import graph contract
+
+The import of a package in `src/recsys/` must not pull a heavy
+dependency the package does not need. The rule exists because a
+transitive import is invisible until an environment that lacks the
+dependency runs, and then it fails as "the whole package cannot
+import" rather than as a single missing-import error in the right
+place (see the M3.6 incidents in `CHANGELOG.md`).
+
+**Definition of heavy.** `numpy`, `psycopg`, `psycopg_pool`,
+`redis`, `pyarrow`, and any dependency that pulls a compiled
+extension or a large native library. The list is checked by
+`tests/unit/test_import_graph.py`; adding a dependency to it is a
+one-line change there plus a note here.
+
+**The rule.** `recsys.api.schemas`, `recsys.retrieval.filters`,
+`recsys.popularity.cache`, `recsys.popularity.snapshot`,
+`recsys.experiments.assignment`, `recsys.experiments.loader`, and
+`recsys.events.hashing` are light modules: importing them must not
+pull any of the heavy dependencies. `recsys.retrieval.__init__`
+and `recsys.api.__init__` are deliberately empty for the same
+reason; a re-export there would make every submodule import pull
+the heavy dependency the re-export target needs.
+
+**How it is enforced.** The CI job `import-graph` runs
+`tests/unit/test_import_graph.py` (a fresh subprocess per
+module). The job is separate from `unit` so a red there is
+identifiable at a glance; it is also fast (30 s) so it can run
+before the heavier jobs without delaying them.
+
+**What the rule does not cover.** A package that legitimately
+needs a heavy dependency (`recsys.embedding`, `recsys.retrieval.
+pgvector`) may import it at module scope. The rule is about
+packages that do not, not about avoiding heavy dependencies
+altogether.
+
 ## 4. Telemetry contract
 
 Observability is part of the contract, not an afterthought. Names below are
