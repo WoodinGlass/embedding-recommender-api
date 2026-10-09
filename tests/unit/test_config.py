@@ -258,3 +258,39 @@ def test_settings_does_not_import_the_api_layer() -> None:
     assert not forbidden, (
         f"recsys.config.settings must not import from recsys.api; found: {forbidden}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Experiment Settings (ADR-0017)
+# --------------------------------------------------------------------------- #
+def test_experiment_disabled_default_false() -> None:
+    # Memuat Settings dengan environment bersih; default harus False.
+    import os
+    from unittest.mock import patch
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("EXPERIMENT_")}
+    with patch.dict(os.environ, env, clear=True):
+        s = Settings()
+    assert s.experiment_disabled is False
+    assert s.experiment_env_override is None
+
+
+def test_experiment_env_override_accepts_known_envs() -> None:
+    from unittest.mock import patch
+
+    for value in ("dev", "staging", "prod"):
+        with patch.dict("os.environ", {"EXPERIMENT_ENV_OVERRIDE": value}, clear=False):
+            s = Settings()
+            assert s.experiment_env_override == value
+
+
+def test_experiment_env_override_rejects_unknown() -> None:
+    from unittest.mock import patch
+
+    import pytest
+
+    with (
+        patch.dict("os.environ", {"EXPERIMENT_ENV_OVERRIDE": "production"}, clear=False),
+        pytest.raises(ValueError, match="EXPERIMENT_ENV_OVERRIDE"),
+    ):
+        Settings()

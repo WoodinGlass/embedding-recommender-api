@@ -177,6 +177,17 @@ class Settings(BaseSettings):
     # experiments (ADR-0017)
     # ------------------------------------------------------------------ #
     experiment_salt_default: str = "recsys-default-v1"
+    #: Kill switch (ADR-0017). When True, every experiment is treated
+    #: as stopped for this process and the fallback variant is served.
+    #: Read at startup; flipping it requires a restart, which is the
+    #: intended trade-off (a mid-process flip of a running experiment
+    #: is a worse surprise than a restart).
+    experiment_disabled: bool = False
+    #: When set, replaces the `APP_ENV` prefix on the effective salt
+    #: (ADR-0017). A staging replay that must reproduce a prod user's
+    #: assignment sets this to "prod". Not the default; a value outside
+    #: the AppEnv enum is rejected at construction.
+    experiment_env_override: str | None = None
 
     # ------------------------------------------------------------------ #
     # deployment (ADR-0023)
@@ -221,6 +232,16 @@ class Settings(BaseSettings):
         allowed = {"HS256", "RS256"}
         if v not in allowed:
             raise ValueError(f"JWT_ALGORITHM must be one of {sorted(allowed)}, got {v!r}")
+        return v
+
+    @field_validator("experiment_env_override")
+    @classmethod
+    def _experiment_env_override_allowed(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        allowed = {e.value for e in AppEnv}
+        if v not in allowed:
+            raise ValueError(f"EXPERIMENT_ENV_OVERRIDE must be one of {sorted(allowed)}, got {v!r}")
         return v
 
     @model_validator(mode="after")
