@@ -592,3 +592,143 @@ def test_gate_non_informational_still_fails_normally(tmp_path: pathlib.Path) -> 
     }
     result = evaluate_gate(th, report)
     assert result.passed is False
+
+
+# --------------------------------------------------------------------------- #
+# informational_floors (M3.5.7a)
+# --------------------------------------------------------------------------- #
+def _write_with_floors(
+    path: pathlib.Path,
+    *,
+    informational: list[str],
+    informational_floors: dict[str, dict[str, float]],
+    per_system: dict[str, dict[str, float]] | None = None,
+) -> None:
+    doc: dict[str, object] = {
+        "schema_version": 1,
+        "golden_set_version": "v1",
+        "absolute_floor": {},
+        "informational": informational,
+        "informational_floors": informational_floors,
+    }
+    if per_system:
+        doc.update(per_system)
+    path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+
+def test_informational_floors_parsed(tmp_path: pathlib.Path) -> None:
+    p = tmp_path / "t.yaml"
+    _write_with_floors(
+        p,
+        informational=["arm_a"],
+        informational_floors={"arm_a": {"provider_missing_rate_recency": 0.01}},
+        per_system={"pgvector_hnsw": {"ndcg_at_10": 0.5}},
+    )
+    th = load_thresholds(p)
+    assert "arm_a" in th.informational_floors
+    assert th.informational_floors["arm_a"]["provider_missing_rate_recency"] == 0.01
+
+
+def test_informational_floors_absent_is_empty(tmp_path: pathlib.Path) -> None:
+    _write_thresholds(
+        tmp_path / "t.yaml",
+        absolute_floor={},
+        per_system={"pgvector_hnsw": {"ndcg_at_10": 0.5}},
+    )
+    th = load_thresholds(tmp_path / "t.yaml")
+    assert th.informational_floors == {}
+
+
+def test_informational_floors_not_mapping_rejected(tmp_path: pathlib.Path) -> None:
+    p = tmp_path / "t.yaml"
+    p.write_text(
+        "schema_version: 1\ngolden_set_version: v1\n"
+        "absolute_floor: {}\n"
+        "pgvector_hnsw:\n  ndcg_at_10: 0.5\n"
+        "informational_floors: not_a_mapping\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ThresholdError, match="informational_floors must be a mapping"):
+        load_thresholds(p)
+
+
+def test_informational_floor_breach_fails_gate(tmp_path: pathlib.Path) -> None:
+    """A degraded arm whose `provider_missing_rate_recency` is above the
+    floor fails the gate even though the arm is informational. This is
+    the check that would have caught the M3.4 provider bug."""
+    p = tmp_path / "t.yaml"
+    _write_with_floors(
+        p,
+        informational=["arm_a"],
+        informational_floors={"arm_a": {"provider_missing_rate_recency": 0.01}},
+        per_system={"pgvector_hnsw": {"ndcg_at_10": 0.5}},
+    )
+    th = load_thresholds(p)
+    report = {
+        "golden_set_version": "v1",
+        "commit": "abc",
+        "created_at": "2026-01-01T00:00:00Z",
+        "systems": {
+            "pgvector_hnsw": {"metrics": {"ndcg_at_10": 0.9}},
+            "arm_a": {
+                "metrics": {
+                    "ndcg_at_10": 0.9,
+                    "provider_missing_rate_recency": 1.0,
+                }
+            },
+        },
+    }
+    result = evaluate_gate(th, report)
+    assert result.passed is False
+    assert any(f.kind == "informational_floor" for f in result.failures)
+
+
+def test_informational_floor_below_passes(tmp_path: pathlib.Path) -> None:
+    p = tmp_path / "t.yaml"
+    _write_with_floors(
+        p,
+        informational=["arm_a"],
+        informational_floors={"arm_a": {"provider_missing_rate_recency": 0.01}},
+        per_system={"pgvector_hnsw": {"ndcg_at_10": 0.5}},
+    )
+    th = load_thresholds(p)
+    report = {
+        "golden_set_version": "v1",
+        "commit": "abc",
+        "created_at": "2026-01-01T00:00:00Z",
+        "systems": {
+            "pgvector_hnsw": {"metrics": {"ndcg_at_10": 0.9}},
+            "arm_a": {
+                "metrics": {
+                    "ndcg_at_10": 0.9,
+                    "provider_missing_rate_recency": 0.0,
+                }
+            },
+        },
+    }
+    result = evaluate_gate(th, report)
+    assert result.passed is True
+
+
+def test_informational_floor_ignores_quality_metrics(tmp_path: pathlib.Path) -> None:
+    """A low `ndcg_at_10` on an informational arm does not fail the gate;
+    only a metric named in `informational_floors` is compared."""
+    p = tmp_path / "t.yaml"
+    _write_with_floors(
+        p,
+        informational=["arm_a"],
+        informational_floors={"arm_a": {"provider_missing_rate_recency": 0.01}},
+        per_system={"pgvector_hnsw": {"ndcg_at_10": 0.5}},
+    )
+    th = load_thresholds(p)
+    report = {
+        "golden_set_version": "v1",
+        "commit": "abc",
+        "created_at": "2026-01-01T00:00:00Z",
+        "systems": {
+            "pgvector_hnsw": {"metrics": {"ndcg_at_10": 0.9}},
+            "arm_a": {"metrics": {"ndcg_at_10": 0.001}},
+        },
+    }
+    result = evaluate_gate(th, report)
+    assert result.passed is True

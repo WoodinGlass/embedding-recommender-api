@@ -59,6 +59,13 @@ class Thresholds:
     absolute_floor: dict[str, dict[str, float]]
     per_system: dict[str, dict[str, float]]
     informational_systems: frozenset[str] = frozenset()
+    #: Operational floors for informational systems: metrics that must be
+    #: checked even though the system is not gated on quality. Used for
+    #: `provider_missing_rate_*` on the rerank arms — an arm whose signal
+    #: provider was unavailable is not the arm it claims to be, and its
+    #: numbers would be misread. See ADR-0017 and the M3.4 -> M3.5
+    #: incident in CHANGELOG.md.
+    informational_floors: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -69,7 +76,7 @@ class MetricFailure:
     metric: str
     value: float
     threshold: float
-    kind: Literal["per_system", "absolute_floor"]
+    kind: Literal["per_system", "absolute_floor", "informational_floor"]
 
 
 @dataclass(frozen=True)
@@ -80,6 +87,32 @@ class GateResult:
     failures: list[MetricFailure] = field(default_factory=list)
     reason: str | None = None  # populated only when passed is False and no
     # metric failure (version/staleness check)
+
+
+def _parse_informational_floors(raw: Any) -> dict[str, dict[str, float]]:
+    """Parse the optional ``informational_floors`` mapping.
+
+    An absent section is the empty dict. A present section is a
+    mapping from system name to a mapping of metric->number, the same
+    shape as ``absolute_floor``. The check is deliberately the same as
+    ``absolute_floor`` so a reader who knows one knows the other.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ThresholdError("informational_floors must be a mapping")
+    out: dict[str, dict[str, float]] = {}
+    for sys_name, metrics in raw.items():
+        if not isinstance(sys_name, str):
+            raise ThresholdError(
+                f"informational_floors: system name must be a string, got {sys_name!r}"
+            )
+        if not isinstance(metrics, dict):
+            raise ThresholdError(
+                f"informational_floors.{sys_name}: must be a mapping of metric->number"
+            )
+        out[sys_name] = _validate_metric_map(metrics, f"informational_floors.{sys_name}")
+    return out
 
 
 def load_thresholds(path: pathlib.Path) -> Thresholds:
@@ -125,9 +158,16 @@ def load_thresholds(path: pathlib.Path) -> Thresholds:
         absolute_floor[sys_name] = _validate_metric_map(metrics, f"absolute_floor.{sys_name}")
 
     informational_systems = _parse_informational(doc.get("informational"))
+    informational_floors = _parse_informational_floors(doc.get("informational_floors"))
 
     per_system: dict[str, dict[str, float]] = {}
-    reserved = {"schema_version", "golden_set_version", "absolute_floor", "informational"}
+    reserved = {
+        "schema_version",
+        "golden_set_version",
+        "absolute_floor",
+        "informational",
+        "informational_floors",
+    }
     for key, value in doc.items():
         if key in reserved:
             continue
@@ -154,6 +194,7 @@ def load_thresholds(path: pathlib.Path) -> Thresholds:
         absolute_floor=absolute_floor,
         per_system=per_system,
         informational_systems=informational_systems,
+        informational_floors=informational_floors,
     )
 
 
@@ -282,11 +323,38 @@ def evaluate_gate(
     for system_name, system_data in systems.items():
         if not isinstance(system_data, dict):
             continue
-        # Informational systems are logged, not gated. See the
-        # Thresholds docstring for why: a system without a measured
+        # Informational systems are logged, not gated on quality. See
+        # the Thresholds docstring for why: a system without a measured
         # baseline cannot have a meaningful threshold, and a threshold
         # of 0.00 is a gate that cannot fail.
+        #
+        # They may still be gated on an *operational* metric via
+        # `informational_floors`: a `provider_missing_rate_*` above the
+        # floor means the arm's numbers were produced with a signal
+        # missing, and the numbers do not mean what the arm's name
+        # says. This is the check that would have caught the M3.4
+        # provider bug (see CHANGELOG.md).
         if system_name in thresholds.informational_systems:
+            metrics = system_data.get("metrics")
+            if isinstance(metrics, dict):
+                info_floors = thresholds.informational_floors.get(system_name, {})
+                for metric_name, value in metrics.items():
+                    if metric_name not in info_floors:
+                        continue
+                    if not isinstance(value, (int, float)) or isinstance(value, bool):
+                        continue
+                    value_f = float(value)
+                    t = info_floors[metric_name]
+                    if value_f > t:
+                        failures.append(
+                            MetricFailure(
+                                system=system_name,
+                                metric=metric_name,
+                                value=value_f,
+                                threshold=t,
+                                kind="informational_floor",
+                            )
+                        )
             continue
         metrics = system_data.get("metrics")
         if not isinstance(metrics, dict):

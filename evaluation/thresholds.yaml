@@ -74,3 +74,26 @@ random_baseline:
   ndcg_at_10: 0.00
   mrr: 0.00
   ann_recall_vs_exact: null
+
+
+# Per-system floors for the informational arms that apply even though
+# the arm is not gated on quality. A `provider_missing_rate_*` above
+# the floor means a signal provider was unavailable for a meaningful
+# share of the golden set: the arm's metrics were produced with a
+# signal missing, and the numbers do not mean what the arm's name
+# says.
+#
+# This is not a quality threshold. It is an operational one: it fails
+# the build when a provider is broken, not when an arm's NDCG is low.
+# See docs/adr/0017-experiment-assignment.md and the M3.4 -> M3.5
+# incident recorded in CHANGELOG.md.
+informational_floors:
+  pgvector_hnsw_blend:
+    provider_missing_rate_popularity: 0.01
+    provider_missing_rate_recency: 0.01
+  pgvector_hnsw_blend_mmr:
+    provider_missing_rate_popularity: 0.01
+    provider_missing_rate_recency: 0.01
+  exact_knn_blend:
+    provider_missing_rate_popularity: 0.01
+    provider_missing_rate_recency: 0.01
