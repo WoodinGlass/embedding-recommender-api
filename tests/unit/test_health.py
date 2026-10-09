@@ -75,14 +75,21 @@ def test_request_id_truncated_when_too_long(client: TestClient) -> None:
     assert len(r.headers["X-Request-ID"]) == 64
 
 
-def test_churn_stub_returns_503(client: TestClient) -> None:
-    r = client.post("/v1/churn/score", json={"user_id": "u_1"})
+def test_churn_stub_returns_503(authed_client: TestClient) -> None:
+    r = authed_client.post("/v1/churn/score", json={"user_id": "u_1"})
     assert r.status_code == 503
     assert "M7" in r.json()["detail"]
 
 
-def test_events_stub_returns_503(client: TestClient) -> None:
-    r = client.post(
+def test_churn_requires_auth(client: TestClient) -> None:
+    """No credential: the auth dependency rejects before the handler."""
+    r = client.post("/v1/churn/score", json={"user_id": "u_1"})
+    assert r.status_code == 401
+    assert r.json()["detail"]["code"] == "unauthenticated"
+
+
+def test_events_stub_returns_503(authed_client: TestClient) -> None:
+    r = authed_client.post(
         "/v1/events",
         json={
             "event_id": "evt_0001",
@@ -94,6 +101,23 @@ def test_events_stub_returns_503(client: TestClient) -> None:
         },
     )
     assert r.status_code == 503
+
+
+def test_events_requires_auth(client: TestClient) -> None:
+    """No credential: the auth dependency rejects before the handler."""
+    r = client.post(
+        "/v1/events",
+        json={
+            "event_id": "evt_0001",
+            "event_ts": "2026-01-15T10:30:00Z",
+            "event_type": "impression",
+            "user_id": "u_1",
+            "item_id": "i_1",
+            "position": 1,
+        },
+    )
+    assert r.status_code == 401
+    assert r.json()["detail"]["code"] == "unauthenticated"
 
 
 def test_recommend_rejects_unknown_filter(authed_client: TestClient) -> None:
