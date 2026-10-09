@@ -34,8 +34,7 @@ async def search(
     vector: list[float],
     k: int,
     filters: dict[str, object] | None = None,
-) -> list[tuple[str, float]]:
-    ...
+) -> list[tuple[str, float]]: ...
 ```
 
 The M0 signature was written before the metrics and evaluation harness

@@ -45,13 +45,18 @@ def authed_client() -> Iterator[TestClient]:
 def test_healthz(client: TestClient) -> None:
     r = client.get("/healthz")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    assert r.json() == {"status": "alive"}
 
 
 def test_readyz(client: TestClient) -> None:
+    """No database in unit tests: db and index fail, so the aggregate
+    is not_ready/503. The body still carries every check."""
     r = client.get("/readyz")
-    assert r.status_code == 200
-    assert r.json()["status"] == "ready"
+    assert r.status_code == 503
+    body = r.json()
+    assert body["status"] == "not_ready"
+    for name in ("db", "index", "encoder", "redis"):
+        assert name in body["checks"]
 
 
 def test_metrics_exposes_active_index_info(client: TestClient) -> None:

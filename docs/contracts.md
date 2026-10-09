@@ -619,12 +619,17 @@ Returns a three-state `status` and a structured `checks` object.
 {
   "status": "ready",
   "checks": {
-    "db":    { "ok": true,  "latency_ms": 2 },
-    "index": { "ok": true,  "index_version": "idx-a3f9e021", "row_count": 200 },
-    "redis": { "ok": true,  "required": false, "latency_ms": 1 }
+    "db":      { "ok": true,  "required": true,  "latency_ms": 2 },
+    "index":   { "ok": true,  "required": true,  "index_version": "idx-a3f9e021", "row_count": 200 },
+    "encoder": { "ok": true,  "required": false },
+    "redis":   { "ok": true,  "required": false, "latency_ms": 1 }
   }
 }
 ```
+
+The ``encoder`` check is required in prod, optional in dev and
+test. ``redis`` is always optional; a Redis hiccup degrades the
+instance rather than draining it.
 
 | `status` | HTTP | Meaning |
 |---|---|---|

@@ -385,8 +385,14 @@ jobs:
           done
 
           echo "--- /readyz ---"
-          curl -fsS http://127.0.0.1:8000/readyz
+          # The smoke container has no database; /readyz reports
+          # not_ready (503). Use -sS (no -f): the point is that the
+          # endpoint answers with the contract shape, not that the
+          # body is "ready".
+          curl -sS -o /tmp/readyz.json -w "readyz HTTP %{http_code}\n" http://127.0.0.1:8000/readyz
+          cat /tmp/readyz.json
           echo
+          grep -q '"status"' /tmp/readyz.json
 
           echo "--- /metrics ---"
           curl -fsS http://127.0.0.1:8000/metrics | grep -q "recsys_active_index_info"
