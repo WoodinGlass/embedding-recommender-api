@@ -106,6 +106,32 @@ class PipelineFailure:
     detail: str | None = None
 
 
+@dataclass(frozen=True)
+class RetrievalResult:
+    """Candidates the retriever produced, before re-ranking.
+
+    ``sync_retrieve`` returns this; ``sync_rerank`` consumes it.
+    Splitting the pipeline is what makes the cache possible: the
+    cache stores retrieval, not the re-ranked list (ADR-0015), so a
+    cache hit skips retrieve and still runs rerank.
+
+    ``candidates`` is a tuple for the same reason ``PipelineResult.
+    items`` is: a value, not a mutable buffer. ``index_version`` and
+    ``model_version`` travel with the candidates so ``sync_rerank``
+    can stamp the response without asking the backend again.
+    """
+
+    candidates: tuple[Candidate, ...]
+    index_version: str
+    model_version: str
+    #: Provider signals that were missing when the candidates were
+    #: built. Travels with the result so ``sync_rerank`` (and the
+    #: cache-hit path) can pass it to the re-ranker. A cache hit has
+    #: candidates but no provider call; the re-ranker still needs to
+    #: know which signals were unavailable.
+    missing_signals: frozenset[str] = frozenset()
+
+
 class _EncoderLike(Protocol):
     @property
     def model_version(self) -> str: ...
@@ -151,7 +177,7 @@ def _safe_provider_get(
     return {str(k): float(v) for k, v in dict(result).items()}, True
 
 
-def sync_pipeline(
+def sync_retrieve(
     *,
     connection: Any,
     encoder: _EncoderLike | None,
@@ -159,20 +185,24 @@ def sync_pipeline(
     k: int,
     filters: Mapping[str, str] | None,
     rerank_config: RerankConfig,
-    reranker: Reranker,
     popularity_provider: PopularityProvider,
     recency_provider: RecencyProvider,
     hnsw_ef_search: int,
     active_index_version: str | None = None,
     pgvector_version: Any | None = None,
     backend: _BackendLike | None = None,
-) -> PipelineResult | PipelineFailure:
-    """Run the full synchronous pipeline for one recommend request.
+) -> RetrievalResult | PipelineFailure:
+    """Encode, resolve the query, retrieve, and build candidates.
 
-    ``backend`` is optional: production passes ``None`` and the
-    function builds a ``PgvectorBackend`` from the active index row;
-    a unit test passes a fake. The distinction is what makes the
-    pipeline testable without a database.
+    Everything up to (and not including) the re-rank. The re-ranker
+    runs in ``sync_rerank`` because the cache (ADR-0015) stores the
+    candidate list, not the re-ranked response — a change to the
+    rerank config invalidates the response, not the retrieval.
+
+    Returns ``RetrievalResult`` when the retriever produced a list
+    (which may be empty: a very selective filter is a legitimate
+    answer) or ``PipelineFailure`` for every reason the old
+    ``sync_pipeline`` returned before reranking.
     """
     if k < 1:
         raise ValueError(f"k must be >= 1, got {k!r}")
@@ -183,9 +213,6 @@ def sync_pipeline(
     if not seed_item_ids:
         return PipelineFailure("empty_seeds")
 
-    # Active index. ``from_registry`` reads ``index_registry`` and
-    # raises ``RuntimeError`` if no row is active; that is the case
-    # the fallback chain serves.
     if backend is None:
         from recsys.retrieval.pgvector import PgvectorBackend
 
@@ -202,10 +229,6 @@ def sync_pipeline(
         except RuntimeError as exc:
             return PipelineFailure("no_active_index", detail=str(exc)[:200])
 
-    # Query vector. ``resolve_query_vector`` returns ``None`` when
-    # every seed is absent from the catalog, or when the mean is the
-    # zero vector (a symmetric seed set). Both are "no usable
-    # query", which the client learns as a 4xx.
     from recsys.retrieval.query import resolve_query_vector
 
     query_vector = resolve_query_vector(
@@ -214,9 +237,6 @@ def sync_pipeline(
     if query_vector is None:
         return PipelineFailure("all_seeds_missing")
 
-    # Retrieve. The candidate window is the multiplier the re-ranker
-    # configuration fixes (ADR-0016 § Candidate window); the ANN call
-    # is bounded by the caller's request timeout, not here.
     candidate_k = k * rerank_config.candidate_multiplier
     needs_vectors = rerank_config.enable_mmr and k >= rerank_config.mmr_min_k
 
@@ -232,16 +252,12 @@ def sync_pipeline(
         return PipelineFailure("ann_error", detail=f"{type(exc).__name__}: {exc}"[:200])
 
     if not pairs:
-        # An empty retrieval is a valid answer from the backend (a
-        # very selective filter). The chain does not have another
-        # tier to reach for; the response is 200 with zero items.
-        return PipelineResult(
-            items=(),
+        return RetrievalResult(
+            candidates=(),
             index_version=backend.active_index_version,
             model_version=encoder.model_version,
         )
 
-    # Providers.
     ids = [iid for iid, _ in pairs]
     pop_map, pop_ok = _safe_provider_get(popularity_provider, ids)
     rec_map, rec_ok = _safe_provider_get(recency_provider, ids)
@@ -251,7 +267,7 @@ def sync_pipeline(
     if not rec_ok:
         missing_signals.add("recency")
 
-    candidates = [
+    candidates = tuple(
         Candidate(
             item_id=iid,
             similarity=score,
@@ -260,19 +276,52 @@ def sync_pipeline(
             vector=vectors.get(iid),
         )
         for iid, score in pairs
-    ]
+    )
+    # ``missing_signals`` travels on the result, not as a side channel:
+    # a cache hit has candidates but no provider call, and the re-ranker
+    # still needs to know the signals' health. Stored as the same
+    # frozenset the re-ranker expects.
+    return RetrievalResult(
+        candidates=candidates,
+        index_version=backend.active_index_version,
+        model_version=encoder.model_version,
+        missing_signals=frozenset(missing_signals),
+    )
 
-    # Re-rank. The re-ranker must not add or remove items (its
-    # protocol says so); it returns the same ids in a new order.
-    # The seeds are removed *after* the re-rank, so the ranker sees
-    # them and the top-k it returns is a candidate pool from which
-    # the seeds are then dropped and the list is truncated to ``k``.
+
+def sync_rerank(
+    *,
+    candidates: Sequence[Candidate],
+    reranker: Reranker,
+    k: int,
+    seed_item_ids: Sequence[str],
+    index_version: str,
+    model_version: str,
+    missing_signals: frozenset[str] = frozenset(),
+) -> PipelineResult | PipelineFailure:
+    """Re-rank the candidates and shape the response items.
+
+    Seeds are removed *after* the re-rank: the ranker sees them, and
+    the top-k it returns is a candidate pool from which the seeds
+    are dropped and the list is truncated to ``k``. Removing before
+    would tell the ranker to ignore a signal the caller asked for.
+    """
+    if k < 1:
+        raise ValueError(f"k must be >= 1, got {k!r}")
+
+    if not candidates:
+        return PipelineResult(
+            items=(),
+            index_version=index_version,
+            model_version=model_version,
+        )
+
     seeds = set(seed_item_ids)
     try:
         ranked = reranker.rerank(
-            candidates=candidates,
+            candidates=list(candidates),
             k=k + len(seeds),
-            missing_signals=frozenset(missing_signals),
+            missing_signals=missing_signals,
         )
     except Exception as exc:
         return PipelineFailure("ann_error", detail=f"rerank: {type(exc).__name__}: {exc}"[:200])
@@ -280,8 +329,58 @@ def sync_pipeline(
     filtered = tuple((iid, score) for iid, score in ranked if iid not in seeds)[:k]
     return PipelineResult(
         items=filtered,
-        index_version=backend.active_index_version,
-        model_version=encoder.model_version,
+        index_version=index_version,
+        model_version=model_version,
+    )
+
+
+def sync_pipeline(
+    *,
+    connection: Any,
+    encoder: _EncoderLike | None,
+    seed_item_ids: Sequence[str],
+    k: int,
+    filters: Mapping[str, str] | None,
+    rerank_config: RerankConfig,
+    reranker: Reranker,
+    popularity_provider: PopularityProvider,
+    recency_provider: RecencyProvider,
+    hnsw_ef_search: int,
+    active_index_version: str | None = None,
+    pgvector_version: Any | None = None,
+    backend: _BackendLike | None = None,
+) -> PipelineResult | PipelineFailure:
+    """Run retrieve then rerank as one call.
+
+    Kept for callers that do not need the split (the evaluation
+    runner, the load test's warmup). The handler uses the split
+    so the cache can sit between the two halves.
+    """
+    retrieval = sync_retrieve(
+        connection=connection,
+        encoder=encoder,
+        seed_item_ids=seed_item_ids,
+        k=k,
+        filters=filters,
+        rerank_config=rerank_config,
+        popularity_provider=popularity_provider,
+        recency_provider=recency_provider,
+        hnsw_ef_search=hnsw_ef_search,
+        active_index_version=active_index_version,
+        pgvector_version=pgvector_version,
+        backend=backend,
+    )
+    if isinstance(retrieval, PipelineFailure):
+        return retrieval
+
+    return sync_rerank(
+        candidates=retrieval.candidates,
+        reranker=reranker,
+        k=k,
+        seed_item_ids=seed_item_ids,
+        index_version=retrieval.index_version,
+        model_version=retrieval.model_version,
+        missing_signals=retrieval.missing_signals,
     )
 
 
@@ -289,5 +388,8 @@ __all__ = [
     "PipelineFailure",
     "PipelineFailureReason",
     "PipelineResult",
+    "RetrievalResult",
     "sync_pipeline",
+    "sync_rerank",
+    "sync_retrieve",
 ]
