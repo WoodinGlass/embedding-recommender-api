@@ -137,7 +137,15 @@ dev-lite = [
   # failure that only shows up in CI; the extra keeps the two
   # environments consistent. redis-py has no compiled extension, so
   # the install cost is negligible.
-  "embedding-recommender-api[api,auth,cache,observability]",
+  # db is included so the app factory can build the connection pool
+  # at import time in the lint and unit jobs. `create_app` runs at
+  # module level (`app = create_app()`), and the pool is built there
+  # even when no database is reachable; without the extra, the
+  # import of psycopg_pool fails and takes the whole module with it.
+  # The pool opens in the lifespan, so a missing database is a
+  # readiness problem, not a startup one; the driver being absent is
+  # the failure mode this extra removes.
+  "embedding-recommender-api[api,auth,cache,db,observability]",
   # tests
   "pytest>=8.3,<9.0",
   "pytest-asyncio>=0.24,<1.0",
@@ -269,6 +277,7 @@ module = [
   "locust.*",
   "passlib.*",
   "psycopg.*",
+  "psycopg_pool.*",
   "redis.*",
   "yaml.*",
   "pyarrow.*",
