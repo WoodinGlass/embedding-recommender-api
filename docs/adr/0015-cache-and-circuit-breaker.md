@@ -73,13 +73,27 @@ cache:v1:similar:<blake2b-hex-16>
   finds every control entry. Folding the variant into the hash would make
   that impossible without a full scan.
 
-The hash is over the canonical request: `index_version`, endpoint, `k`,
-sorted filter fields and values, and the seed item ids (sorted). The
-`user_id` is **not** in the key. Personalization at this project's scale
-comes from the seed items; two users with the same seeds see the same
-recommendations, which is correct given the features the model uses.
-Adding the user id would multiply the key space by the user count and
-push the hit rate toward zero for no behavioral change.
+The hash is over the canonical request: `index_version`, endpoint,
+`k_max`, sorted filter fields and values, and the seed item ids **sorted
+and deduplicated**. The `user_id` is **not** in the key. Personalization
+at this project's scale comes from the seed items; two users with the
+same seeds see the same recommendations, which is correct given the
+features the model uses. Adding the user id would multiply the key space
+by the user count and push the hit rate toward zero for no behavioral
+change.
+
+**`k_max`, not `k`.** The cache stores candidates at `k_max` (from
+`hot_config.cache.cache_k_max`, default 100) and the handler slices to
+the requested `k` at serve time. If `k` were in the key, `k=5` and
+`k=20` would be two entries for one retrieval, halving the hit rate for
+a request whose answer is a prefix of the other's. The cost is that a
+request for `k=5` retrieves `k_max * candidate_multiplier` candidates;
+the load test in M4 measures the trade-off and the config is tunable
+without a restart (ADR-0022 § hot config).
+
+**Deduplicate seeds.** `["a", "a", "b"]` and `["a", "b"]` are the
+same query (a set of seeds, not a multiset); without dedup, the two
+produce different keys and the second is a permanent miss.
 
 **TTL:** per class, from config.
 
@@ -111,6 +125,23 @@ re-ranked list would serve a stale ordering. The cache stores the
 runs on every request. If M4's load test shows re-ranking dominates
 latency, the fix is to optimize re-ranking, not to cache its output.
 
+**MMR-enabled requests skip the cache (M3.6).** The MMR arm of the
+re-ranker needs each candidate's embedding vector (ADR-0016 § MMR); a
+`Candidate` with its 384-float `vector` is roughly 1.5 KB of JSON per
+candidate, and caching that would bloat Redis by an order of magnitude
+for a config that is not the production default. In M3.6 a request
+with `enable_mmr=true` bypasses the cache lookup and the write; the
+skip is counted by `recsys_cache_skip_total{reason="mmr_enabled"}` so
+an operator can see the cost. The **target design** is to cache the
+candidates without their vectors and, on a cache hit for an MMR
+request, fetch the vectors by primary-key lookup through a future
+`IndexBackend.get_vectors_by_ids(item_ids)` method. That preserves the
+cache for MMR, which matters if MMR becomes the default or is A/B
+tested — an A/B test of MMR against non-MMR would otherwise be
+confounded by the MMR arm's 0% hit rate. The target is recorded here
+so the skip is understood as a deferred feature, not a design
+conclusion.
+
 **Cache warming on index promote.** After `promote_index.py` swaps the
 active pointer, the cache for the new index is empty. The first N
 requests pay full retrieval. The promotion script enqueues a warmup job
@@ -125,6 +156,46 @@ critical path — promotion is fast, warmup is best-effort.
 `result="error"`, and treated as a miss. The request proceeds to
 retrieval. The cache is a performance optimization, not a correctness
 mechanism; a failed read must not become a failed request.
+
+### Active index and pgvector version
+
+Two values the request path needs are currently read from the database
+on every request by `PgvectorBackend.from_registry`: the active row's
+`index_version`, and the installed `pgvector` extension version (used to
+decide whether `hnsw.iterative_scan` is available, ADR-0008). Both are
+read once at startup and refreshed on a timer:
+
+- **`active_index_version`** — refresh interval
+  `ACTIVE_INDEX_REFRESH_SECONDS` (default 30 s). A refresh that fails
+(database hiccup) keeps the previous value; it never resets to `None`.
+  A `active_index.changed` log line at INFO records every transition,
+  with `from` and `to`, so a metric anomaly can be correlated with an
+  index promote.
+- **`pgvector_version`** — read once at startup. The extension version
+  does not change without a restart; a timer is not warranted.
+
+The values live on `app.state.active_index` and
+`app.state.pgvector_version`; they are passed into `sync_pipeline` as
+arguments (ADR-0012 § "explicit arguments"), which is also what removes
+the per-request `from_registry` call.
+
+**Serving is gated by readiness, not by the lifespan.** If the database
+is unreachable at startup, `active_index` stays `None`; the process
+boots and answers `/healthz`, and `/readyz` reports `not_ready`. The
+`/v1/recommend` and `/v1/items/{id}/similar` dependencies reject a
+request when `active_index is None` with the same 503 envelope the
+fallback-exhausted path uses, before the handler runs. The alternative
+— raising in the lifespan — would put the process into a restart loop
+under an orchestrator, which is a worse availability outcome than a
+ready-but-not-serving pod (ADR-0019).
+
+New metrics:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `recsys_active_index_info` | gauge | `index_version`, `model_version` | The active index the process is serving; already in `docs/contracts.md` § 4.1, this records where its values come from |
+| `recsys_active_index_staleness_seconds` | gauge | — | Seconds since the last successful refresh; alert threshold is `> 2 × refresh_interval` |
+| `recsys_active_index_refresh_failures_total` | counter | — | Refresh attempts that raised; a sustained rate means the database is flapping |
 
 ### Circuit breaker
 
@@ -238,6 +309,7 @@ New metrics:
 | `recsys_cache_requests_total` | counter | `result` | Already in `docs/contracts.md` § 4.1; `result` ∈ `hit` / `miss` / `bypass` / `error` |
 | `recsys_cache_negative_hits_total` | counter | — | Hits on a negative entry, useful for confirming the negative cache is earning its keep |
 | `recsys_cache_write_errors_total` | counter | `type` | A read that succeeds and a write that fails is a real gap; this counts it |
+| `recsys_cache_skip_total` | counter | `reason` | A request that bypassed the cache for a reason other than the breaker; `reason` ∈ `mmr_enabled` (M3.6), future reasons as they are added |
 
 `recsys_cache_requests_total{result="bypass"}` is the metric a reviewer
 should watch during an incident: a rising bypass rate means Redis is
@@ -255,6 +327,9 @@ set the project accepts:
 | `recsys_cache_requests_total` | `result` ∈ {`hit`, `miss`, `bypass`, `error`} | 4 |
 | `recsys_cache_negative_hits_total` | (none) | 1 |
 | `recsys_cache_write_errors_total` | `type` (Python exception class name, bounded to top 5) | ≤ 5 |
+| `recsys_cache_skip_total` | `reason` ∈ {`mmr_enabled`} (a closed set; a new reason is a code change) | ≤ 3 |
+| `recsys_active_index_staleness_seconds` | (none) | 1 |
+| `recsys_active_index_refresh_failures_total` | (none) | 1 |
 
 `endpoint`, `user_id`, `item_id`, `request_id`, and any per-request value
 are **forbidden** as labels. A label that varies per request multiplies
