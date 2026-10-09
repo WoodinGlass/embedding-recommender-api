@@ -190,6 +190,16 @@ class Settings(BaseSettings):
     experiment_env_override: str | None = None
 
     # ------------------------------------------------------------------ #
+    # popularity snapshot (ADR-0020 § Tier 3)
+    # ------------------------------------------------------------------ #
+    #: Size of the popularity snapshot the fallback chain reads. The
+    #: refresh script (`make popularity-refresh`) writes this many rows;
+    #: tier 3 reads at most `k` of them filtered by the request's
+    #: metadata filters. The default matches the ADR's `POPULARITY_
+    #: SNAPSHOT_SIZE` example.
+    popularity_snapshot_size: int = Field(default=1_000, ge=1, le=100_000)
+
+    # ------------------------------------------------------------------ #
     # deployment (ADR-0023)
     # ------------------------------------------------------------------ #
     pre_stop_delay_seconds: int = Field(default=5, ge=0)

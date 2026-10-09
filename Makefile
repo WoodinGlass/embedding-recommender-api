@@ -88,6 +88,10 @@ eval:  ## Run the offline evaluation and enforce the threshold gate (ADR-0010).
 migrate:  ## Apply Alembic migrations (reads DATABASE_URL from the environment).
 	$(PY) -m alembic upgrade head
 
+.PHONY: popularity-refresh
+popularity-refresh:  ## Refresh popularity_snapshot from the item table (ADR-0020).
+	$(PY) $(SCRIPTS)/refresh_popularity.py
+
 .PHONY: index-build
 index-build:  ## Build an index from the active embedding run.
 	$(PY) scripts/build_index.py
