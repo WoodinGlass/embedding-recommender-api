@@ -25,7 +25,11 @@ from typing import Any
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from recsys.popularity import refresh_popularity_snapshot  # noqa: E402
+from recsys.popularity import (  # noqa: E402
+    fetch_snapshot_rows,
+    refresh_popularity_snapshot,
+    write_popularity_file,
+)
 
 EXIT_OK = 0
 EXIT_INPUT_ERROR = 2
@@ -63,6 +67,15 @@ def _make_parser() -> argparse.ArgumentParser:
         default=10.0,
         help="statement timeout for the refresh (default: %(default)s)",
     )
+    p.add_argument(
+        "--out",
+        type=pathlib.Path,
+        default=REPO_ROOT / "artifacts" / "popularity" / "snapshot.json",
+        help=(
+            "path to write the tier-4 cache file (default: %(default)s); "
+            "the file is read at process startup (ADR-0020 § Tier 4)"
+        ),
+    )
     return p
 
 
@@ -92,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
                 size=args.size,
                 timeout_seconds=args.timeout_seconds,
             )
+            snapshot_rows = fetch_snapshot_rows(connection, size=args.size)
     except Exception as e:
         print(
             json.dumps({"event": "popularity.refresh.error", "message": f"{type(e).__name__}: {e}"})
@@ -104,8 +118,30 @@ def main(argv: list[str] | None = None) -> int:
         with contextlib.suppress(Exception):
             connection.close()
 
+    try:
+        write_popularity_file(path=args.out, items=snapshot_rows)
+    except Exception as e:
+        print(
+            json.dumps(
+                {
+                    "event": "popularity.refresh.file_error",
+                    "message": f"{type(e).__name__}: {e}",
+                    "path": str(args.out),
+                }
+            )
+        )
+        return EXIT_REFRESH_ERROR
+
     print(
-        json.dumps({"event": "popularity.refresh.done", "rows": rows, "size_requested": args.size})
+        json.dumps(
+            {
+                "event": "popularity.refresh.done",
+                "rows": rows,
+                "file_rows": len(snapshot_rows),
+                "file_path": str(args.out),
+                "size_requested": args.size,
+            }
+        )
     )
     return EXIT_OK
 

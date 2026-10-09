@@ -26,6 +26,8 @@ semantics.
 
 from __future__ import annotations
 
+import json
+import pathlib
 from typing import Any, Final
 
 #: The default statement timeout for the refresh. The refresh reads
@@ -95,7 +97,76 @@ def refresh_popularity_snapshot(
     return len(rows)
 
 
+def fetch_snapshot_rows(
+    connection: Any,
+    *,
+    size: int,
+) -> list[tuple[str, int, str, str, str]]:
+    """Return the same rows a refresh would write, without writing.
+
+    The script uses this to build the JSON cache file from the same
+    query the refresh uses, so the file and the table cannot disagree
+    about ordering. The query re-reads the committed table with the same
+    ORDER BY, which gives the identical sequence in one round trip.
+    """
+    if size < 1:
+        raise ValueError(f"size must be >= 1, got {size!r}")
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT item_id, category, brand, language
+            FROM popularity_snapshot
+            ORDER BY rank ASC
+            LIMIT %s
+            """,
+            (size,),
+        )
+        rows = cur.fetchall()
+    return [
+        (str(row[0]), i + 1, str(row[1]), str(row[2]), str(row[3])) for i, row in enumerate(rows)
+    ]
+
+
+def write_popularity_file(
+    *,
+    path: pathlib.Path,
+    items: list[tuple[str, int, str, str, str]],
+) -> None:
+    """Write the in-memory cache file (ADR-0020 § Tier 4).
+
+    `items` is the same data the table holds, as
+    `(item_id, rank, category, brand, language)`. The write is atomic
+    (tempfile + rename) so a reader either sees the old file or the
+    complete new one; a partial file would make the cache fail to load
+    on the next boot.
+
+    The file lives under `artifacts/popularity/`, which is the same
+    artifact tree the embedding runs use. It is not committed; the
+    refresh script creates it. A fresh checkout that never ran the
+    refresh has no file, and the cache starts empty.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "schema_version": 1,
+        "items": [
+            {
+                "item_id": iid,
+                "rank": rank,
+                "category": category,
+                "brand": brand,
+                "language": language,
+            }
+            for iid, rank, category, brand, language in items
+        ],
+    }
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
 __all__ = [
     "DEFAULT_REFRESH_TIMEOUT_SECONDS",
+    "fetch_snapshot_rows",
     "refresh_popularity_snapshot",
+    "write_popularity_file",
 ]
