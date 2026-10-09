@@ -7,6 +7,11 @@ from recsys.experiments.assignment import (
     compute_bucket,
     effective_salt,
 )
+from recsys.experiments.exposure import (
+    ExposureResult,
+    ExposureWriteError,
+    write_exposure,
+)
 from recsys.experiments.loader import (
     Experiment,
     ExperimentsError,
@@ -22,8 +27,11 @@ __all__ = [
     "ExperimentStatus",
     "ExperimentsError",
     "ExperimentsFile",
+    "ExposureResult",
+    "ExposureWriteError",
     "assign",
     "compute_bucket",
     "effective_salt",
     "load_experiments",
+    "write_exposure",
 ]
