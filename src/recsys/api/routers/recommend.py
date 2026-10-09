@@ -142,6 +142,8 @@ async def _run_pipeline(
                 popularity_provider=popularity_provider,
                 recency_provider=recency_provider,
                 hnsw_ef_search=settings.hnsw_ef_search,
+                active_index_version=getattr(request.app.state, "active_index", None),
+                pgvector_version=getattr(request.app.state, "pgvector_version", None),
             )
             try:
                 # ``anyio.fail_after`` is a *sync* context manager in

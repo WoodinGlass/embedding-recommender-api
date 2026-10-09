@@ -212,3 +212,26 @@ THREAD_POOL_ACTIVE = Gauge(
     "Synchronous worker threads currently running a request.",
     registry=REGISTRY,
 )
+
+
+# --------------------------------------------------------------------- #
+# Active index freshness (ADR-0015 amendment)
+# --------------------------------------------------------------------- #
+ACTIVE_INDEX_STALENESS_SECONDS = Gauge(
+    "recsys_active_index_staleness_seconds",
+    "Seconds since the last successful active-index refresh.",
+    registry=REGISTRY,
+)
+
+ACTIVE_INDEX_REFRESH_FAILURES_TOTAL = Counter(
+    "recsys_active_index_refresh_failures_total",
+    "Active-index refresh attempts that raised.",
+    registry=REGISTRY,
+)
+
+CACHE_SKIP_TOTAL = Counter(
+    "recsys_cache_skip_total",
+    "Requests that bypassed the cache for a reason other than the breaker.",
+    labelnames=("reason",),
+    registry=REGISTRY,
+)

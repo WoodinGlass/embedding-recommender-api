@@ -241,26 +241,34 @@ class TestHandlerWithFakeCollaborators:
         *,
         seed_rows: list[tuple[str, str, str]] | None = None,
     ) -> TestClient:
-        # Patch the backend factory the pipeline imports lazily.
+        # The pipeline no longer calls PgvectorBackend.from_registry
+        # (ADR-0015 amendment); it constructs PgvectorBackend
+        # directly with the pre-fetched versions. Patch the class.
         from recsys.retrieval import pgvector as pgvector_module
 
-        def _fake_from_registry(
-            cls: Any,
-            connection: Any,
-            *,
-            hnsw_ef_search: int,
-            max_scan_tuples: Any = None,
-        ) -> Any:
-            return _FakeBackend()
+        class _FakeBackendCls:
+            def __init__(
+                self,
+                _connection: Any,
+                *,
+                active_index_version: str,
+                hnsw_ef_search: int,
+                pgvector_version: Any = None,
+            ) -> None:
+                self._active_index_version = active_index_version
 
-        monkeypatch.setattr(
-            pgvector_module.PgvectorBackend,
-            "from_registry",
-            classmethod(_fake_from_registry),
-        )
+            @property
+            def active_index_version(self) -> str:
+                return self._active_index_version
 
-        # See the note in TestHandlerWiring: the builder is the
-        # right seam, app.state is not.
+            def search(self, *, vector: Any, k: int, filters: Any = None) -> Any:
+                return [("i_a", 0.9), ("i_b", 0.5)][:k]
+
+            def search_with_vectors(self, **_kwargs: Any) -> Any:
+                raise AssertionError("MMR is not enabled in these tests")
+
+        monkeypatch.setattr(pgvector_module, "PgvectorBackend", _FakeBackendCls)
+
         import recsys.api.app as app_module
 
         monkeypatch.setattr(
@@ -270,10 +278,6 @@ class TestHandlerWithFakeCollaborators:
         )
         monkeypatch.setattr(app_module, "_build_encoder", lambda _settings, _log: _FakeEncoder())
 
-        # Explicit: the fallback chain is not what these tests
-        # exercise. Keeping it deterministic (return None) means
-        # these tests do not depend on whether the popularity
-        # snapshot file is present on disk.
         from recsys.api.routers import recommend as rec_router
 
         async def _no_fallback(**_kwargs: Any) -> None:
@@ -282,6 +286,8 @@ class TestHandlerWithFakeCollaborators:
         monkeypatch.setattr(rec_router, "_run_fallback", _no_fallback)
 
         app = create_app(_settings())
+        app.state.active_index = "idx-tests0001"
+        app.state.pgvector_version = "0.6.0"
         return TestClient(app, headers={"X-API-Key": _TEST_API_KEY})
 
     def test_happy_path_uses_real_pipeline(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -395,6 +401,8 @@ class TestHandlerFallback:
         monkeypatch.setattr(app_module, "_build_db_pool", lambda _settings: _FakePool(_FakeConn()))
         monkeypatch.setattr(app_module, "_build_encoder", lambda _settings, _log: _FakeEncoder())
         app = create_app(_settings())
+        app.state.active_index = "idx-tests0001"
+        app.state.pgvector_version = "0.6.0"
         return TestClient(app, headers={"X-API-Key": _TEST_API_KEY})
 
     def test_fallback_ann_returns_200_with_source(self, monkeypatch: pytest.MonkeyPatch) -> None:

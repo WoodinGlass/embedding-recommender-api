@@ -163,6 +163,8 @@ def sync_pipeline(
     popularity_provider: PopularityProvider,
     recency_provider: RecencyProvider,
     hnsw_ef_search: int,
+    active_index_version: str | None = None,
+    pgvector_version: Any | None = None,
     backend: _BackendLike | None = None,
 ) -> PipelineResult | PipelineFailure:
     """Run the full synchronous pipeline for one recommend request.
@@ -187,8 +189,16 @@ def sync_pipeline(
     if backend is None:
         from recsys.retrieval.pgvector import PgvectorBackend
 
+        if active_index_version is None:
+            return PipelineFailure("no_active_index", detail="active_index_version not provided")
+
         try:
-            backend = PgvectorBackend.from_registry(connection, hnsw_ef_search=hnsw_ef_search)
+            backend = PgvectorBackend(
+                connection,
+                active_index_version=active_index_version,
+                hnsw_ef_search=hnsw_ef_search,
+                pgvector_version=pgvector_version,
+            )
         except RuntimeError as exc:
             return PipelineFailure("no_active_index", detail=str(exc)[:200])
 

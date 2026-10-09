@@ -154,6 +154,27 @@ def get_principal(request: Request) -> Principal:
     raise _unauthorized(request, "no credential presented")
 
 
+def get_active_index(request: Request) -> str:
+    """Return the active index version or raise 503.
+
+    Called by endpoints that need an index; None means startup could
+    not read one (database unreachable), which is the same signal as
+    fallback-exhausted. The 503 shape matches the handler's.
+    """
+    value: str | None = getattr(request.app.state, "active_index", None)
+    if value is None:
+        request_id = str(getattr(request.state, "request_id", ""))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "unavailable",
+                "message": "no active index",
+                "request_id": request_id,
+            },
+        )
+    return value
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 RequestIdDep = Annotated[str, Depends(get_request_id)]
 LimiterDep = Annotated[TokenBucketLimiter, Depends(get_limiter)]
@@ -165,3 +186,4 @@ DbPoolDep = Annotated[object, Depends(get_db_pool)]
 PopularityCacheDep = Annotated[PopularityCache, Depends(get_popularity_cache)]
 EncoderDep = Annotated[object | None, Depends(get_encoder)]
 PrincipalDep = Annotated[Principal, Depends(get_principal)]
+ActiveIndexDep = Annotated[str, Depends(get_active_index)]

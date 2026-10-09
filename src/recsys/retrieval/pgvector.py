@@ -198,6 +198,7 @@ class PgvectorBackend:
         active_index_version: str,
         hnsw_ef_search: int,
         max_scan_tuples: int = DEFAULT_MAX_SCAN_TUPLES,
+        pgvector_version: Any | None = None,
     ) -> None:
         """Construct a backend bound to a live connection.
 
@@ -232,7 +233,14 @@ class PgvectorBackend:
         self._hnsw_ef_search = hnsw_ef_search
         self._max_scan_tuples = max_scan_tuples
 
-        self._pgvector_version: PgvectorVersion = self._detect_pgvector_version()
+        # ``pgvector_version`` is prefetched at startup (ADR-0015
+        # amendment). When None (unit tests, or the ``scripts/``
+        # paths that do not go through the app), detect it — one
+        # query, acceptable off the hot path.
+        if pgvector_version is None:
+            self._pgvector_version: PgvectorVersion = self._detect_pgvector_version()
+        else:
+            self._pgvector_version = pgvector_version
         self._log_version_once()
 
     # ------------------------------------------------------------------ props

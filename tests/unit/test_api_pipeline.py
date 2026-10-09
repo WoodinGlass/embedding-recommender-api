@@ -198,6 +198,8 @@ def _call(
         popularity_provider=popularity if popularity is not _DEFAULT else _Provider(),  # type: ignore[arg-type]
         recency_provider=recency if recency is not _DEFAULT else _Provider(),  # type: ignore[arg-type]
         hnsw_ef_search=100,
+        active_index_version=None,  # tests pass a fake backend, so unused
+        pgvector_version=None,
         backend=backend if backend is not _DEFAULT else _Backend(),
     )
 

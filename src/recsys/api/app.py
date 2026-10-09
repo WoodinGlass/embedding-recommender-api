@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -35,6 +36,12 @@ from recsys.resilience import CircuitBreaker, CircuitState
 from recsys.resilience.metrics import (
     breaker_transition_callback,
     set_initial_state,
+)
+from recsys.retrieval.active_index import (
+    ACTIVE_INDEX_REFRESH_SECONDS,
+    fetch_active_index_version,
+    fetch_pgvector_version,
+    refresh_active_index,
 )
 
 
@@ -283,9 +290,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 error=type(exc).__name__,
                 message="continuing; readiness will report not-ready",
             )
+        # The active index and the pgvector version are fetched once
+        # here (ADR-0015 amendment); a refresh task keeps the index
+        # fresh without a query per request. A database that is down
+        # at startup leaves the attributes unset; the handler reads
+        # them with getattr(..., None) and readiness reports not_ready.
+        try:
+            if not getattr(db_pool, "closed", True):
+                with db_pool.connection() as conn:  # type: ignore[attr-defined]
+                    idx = fetch_active_index_version(conn)
+                    pgv = fetch_pgvector_version(conn)
+                if idx is not None:
+                    app.state.active_index = idx
+                if pgv is not None:
+                    app.state.pgvector_version = pgv
+                log.info(
+                    "active_index.startup",
+                    index_version=idx,
+                    pgvector_version=pgv,
+                )
+        except Exception as exc:
+            log.warning(
+                "active_index.startup_failed",
+                error=type(exc).__name__,
+            )
+        refresh_task = asyncio.create_task(
+            refresh_active_index(
+                pool=db_pool,
+                state=app.state,
+                interval_seconds=ACTIVE_INDEX_REFRESH_SECONDS,
+            )
+        )
         try:
             yield
         finally:
+            refresh_task.cancel()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await refresh_task
             with contextlib.suppress(Exception):
                 db_pool.close()  # type: ignore[attr-defined]
             await limiter.close()
