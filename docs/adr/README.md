@@ -53,3 +53,4 @@ Per `docs/contracts.md` § 6 (Change management):
 | [0022](0022-config-management.md) | Configuration management | Accepted |
 | [0023](0023-deployment-strategy.md) | Deployment strategy | Accepted |
 | [0024](0024-slo-and-error-budget.md) | SLOs, error budget, and what this project does not promise | Accepted |
+| [0025](0025-dev-environment-strategy.md) | Development environment strategy | Accepted |

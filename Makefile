@@ -54,8 +54,12 @@ typecheck:  ## Static type checking (mypy, strict).
 check-markers:  ## Enforce test-tier marker discipline.
 	$(PY) $(SCRIPTS)/check_markers.py
 
+.PHONY: check-ruff-version
+check-ruff-version:  ## Enforce ruff version == pyproject pin (ADR-0025).
+	$(PY) $(SCRIPTS)/check_ruff_version.py
+
 .PHONY: check
-check: lint typecheck check-markers test-unit  ## Run all fast quality gates.
+check: lint typecheck check-markers check-ruff-version test-unit  ## Run all fast quality gates.
 
 # -----------------------------------------------------------------------------
 # tests

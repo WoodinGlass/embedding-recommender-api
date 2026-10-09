@@ -56,6 +56,8 @@ jobs:
         run: make typecheck
       - name: Test marker discipline
         run: make check-markers
+      - name: Ruff version pin
+        run: make check-ruff-version
 
   # ---------------------------------------------------------------------------
   # Unit tests — matrix on the versions README claims to support
