@@ -19,6 +19,12 @@ from recsys.cache import CacheStore
 from recsys.config.enums import AppEnv
 from recsys.config.hot import HotConfigError, HotConfigStore, default_hot_config
 from recsys.config.settings import Settings, get_settings
+from recsys.experiments import (
+    SUPPORTED_SCHEMA_VERSION,
+    ExperimentsError,
+    ExperimentsFile,
+    load_experiments,
+)
 from recsys.monitoring.logging import configure_logging, get_logger
 from recsys.monitoring.tracing import configure_tracing
 from recsys.rate_limit import TokenBucketLimiter
@@ -44,6 +50,38 @@ def _build_hot_store(settings: Settings, log: object) -> HotConfigStore:
             raise
         log.warning("hot_config.fallback_to_default", path=str(path))  # type: ignore[attr-defined]
         return HotConfigStore(path, initial=default_hot_config())
+
+
+def _build_experiments(settings: Settings, log: object) -> ExperimentsFile:
+    """Load ``experiments.yaml``; in prod a missing file is fatal.
+
+    The behavior mirrors ``_build_hot_store``: a missing file outside
+    prod falls back to an empty declaration so a fresh checkout (or a
+    test that only cares about ``/healthz``) is not blocked by an
+    optional file. A **malformed** file aborts startup in every
+    environment: ADR-0017 § Validated at startup is explicit that a
+    typo in the YAML is a startup error, not a fallback. The two cases
+    are distinguished by ``Path.is_file()`` before ``load_experiments``
+    runs, so a malformed file is never silently replaced by an empty
+    declaration.
+    """
+    path = Path("experiments.yaml")
+    if not path.is_file():
+        if settings.app_env is AppEnv.PROD:
+            raise ExperimentsError(
+                f"experiments file not found in prod: {path}; "
+                "commit experiments.yaml or set APP_ENV"
+            )
+        log.warning("experiments.fallback_to_empty", path=str(path))  # type: ignore[attr-defined]
+        # Empty declaration, same shape the loader returns. The
+        # schema version comes from the loader, not a hardcoded 1, so a
+        # future bump is one constant rather than two.
+        return ExperimentsFile(
+            schema_version=SUPPORTED_SCHEMA_VERSION,
+            experiments=(),
+            path=path,
+        )
+    return load_experiments(path)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -89,6 +127,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         socket_timeout_seconds=settings.cache_socket_timeout_seconds,
     )
     hot_store = _build_hot_store(settings, log)
+    experiments_file = _build_experiments(settings, log)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -96,6 +135,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.cache = cache_store
         app.state.redis_breaker = redis_breaker
         app.state.hot_config = hot_store
+        app.state.experiments = experiments_file
         try:
             yield
         finally:

@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Experiment assignment (M3.5, ADR-0017): `src/recsys/experiments/`
+  with `loader.py` (validate `experiments.yaml` at startup, abort on
+  a malformed file), `assignment.py` (deterministic
+  `sha256(f"{env}:{salt}:{user_id}") % 10_000`, mapped to variants
+  by allocation in declaration order), and `exposure.py` (synchronous
+  write to `experiment_exposure`, idempotent by
+  `sha256(f"exposure:{experiment}:{request_id}")`, skipped when
+  `log_exposure` is false).
+- `migrations/versions/0002_experiment_exposure.py`: the exposure
+  table with a `user_id_hash ~ '^[0-9a-f]{64}$'` check, a bucket
+  range check, a `fallback_reason` allowlist, and four indices for
+  the M5 and M7 readers.
+- `src/recsys/events/hashing.py`: HMAC-SHA256 user id hashing with a
+  versioned salt (ADR-0018). Shared by the exposure writer now and
+  the events endpoint in M3.6.
+- `Settings.experiment_disabled` (kill switch) and
+  `Settings.experiment_env_override` (a staging replay that must
+  reproduce a prod user's assignment), both validated at startup.
+- `informational_floors` in `evaluation/thresholds.yaml`: per-arm
+  operational floors (`provider_missing_rate_*`) that gate the
+  informational rerank arms even though their quality is not yet
+  gated. This is the check that catches a broken signal provider.
+- `ExperimentsDep` in `src/recsys/api/deps.py`; the loaded
+  `ExperimentsFile` lives on `app.state.experiments`.
+
 - Re-ranker (M3.4, ADR-0016): `src/recsys/retrieval/rerank.py` with
   the `Candidate`, `RerankConfig`, and `Reranker` protocol; the
   `WeightedBlendReranker` implementation (min-max `sim`, rank-based
@@ -356,6 +381,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Milestone tracking lives in [`README.md`](README.md#milestones). Only measured
 numbers belong in the README; this changelog records what changed and when.
+
+**An incident and its fix.** The M3.5 exposure writer failed in CI
+on the first run with `SET LOCAL statement_timeout = $1` rejected
+as a `SyntaxError`. PostgreSQL's extended-query protocol does not
+accept a placeholder on the right-hand side of `SET LOCAL`; the
+function form `set_config(..., is_local=true)` accepts parameters
+and is scoped to the transaction. The fix also applied to
+`PgRecencyProvider`, which had the same bug since M3.4 and was
+**invisible**: the evaluation runner marked the provider failure as
+`degraded` rather than failing the arm, and a degraded arm did not
+fail the gate. Every rerank arm in every M3.4 CI run was produced
+with the recency signal neutral. The `informational_floors` section
+is the fix for the invisibility — a `provider_missing_rate_*` above
+0.01 now fails the build — and the SET LOCAL fix is the fix for the
+bug. Both landed in the same milestone, in that order: the loud
+failure first, then the check that would have made the silent one
+loud.
 
 **A note on the M3.4 rerank arms and the placeholder provider.**
 The first end-to-end run of the arms with the synthetic popularity

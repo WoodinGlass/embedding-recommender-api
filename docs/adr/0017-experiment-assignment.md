@@ -143,6 +143,17 @@ adds a component the project does not have at M3; a synchronous insert
 into the same store the events endpoint writes to is one less moving
 part.
 
+**"The same event store" means the same PostgreSQL instance, not one
+table.** An exposure has `fallback_reason` and `paused` fields that a
+click or an impression does not, and a click has `item_id` and
+`position` fields that an exposure does not. Two tables keep both
+schemas honest: every column is `NOT NULL` (or explicitly nullable for
+a documented reason) on the table that owns it, and a reader of
+`experiment_exposure` does not have to remember that `item_id` is
+always null when `event_type = 'exposure'`. The exposure table lands in
+migration `0002_experiment_exposure`; the events table lands in M3.6
+under the same instance and the same retention policy.
+
 ### Exposure is idempotent by `request_id`
 
 The event store's `event_id` uniqueness (ADR-0018) applies to exposures

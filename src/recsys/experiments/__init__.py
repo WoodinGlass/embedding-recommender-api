@@ -13,6 +13,7 @@ from recsys.experiments.exposure import (
     write_exposure,
 )
 from recsys.experiments.loader import (
+    SUPPORTED_SCHEMA_VERSION,
     Experiment,
     ExperimentsError,
     ExperimentsFile,
@@ -22,6 +23,7 @@ from recsys.experiments.loader import (
 
 __all__ = [
     "BUCKET_SPACE",
+    "SUPPORTED_SCHEMA_VERSION",
     "Assignment",
     "Experiment",
     "ExperimentStatus",
