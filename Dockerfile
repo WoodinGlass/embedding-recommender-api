@@ -31,12 +31,24 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY pyproject.toml README.md LICENSE ./
 COPY src/ ./src/
 
-# Extras: api (FastAPI), auth (API key + JWT), config (experiments.yaml
-# and hot config), observability (structlog, Prometheus, OTEL). No
-# torch, no pyarrow, no onnxruntime: those belong to the pipeline and
-# the encoder parity tests, neither of which runs in the serving image.
+# The serving image installs the extras the request path touches:
+#
+# - api, auth, config, observability — the layers that existed at M3.0.
+# - cache — the Redis client, used by the rate limiter (ADR-0014) and
+#   the response cache (ADR-0015).
+# - db — psycopg + psycopg_pool, used by the retrieval backend and the
+#   connection pool (ADR-0012, ADR-0020).
+# - inference — numpy + onnxruntime + tokenizers, used by the encoder
+#   that turns a seed list into a query vector (ADR-0002). numpy is
+#   also imported by `retrieval/base.py`, so even a request that does
+#   not run the encoder depends on the extra.
+#
+# Not installed: `export` (torch, sentence-transformers), `pipeline`
+# (pyarrow), `bench` (faiss-cpu), `load` (locust). Those belong to the
+# offline pipeline and the tests, neither of which runs in the serving
+# image.
 RUN python -m pip install --upgrade pip && \
-    pip install ".[api,auth,config,observability]"
+    pip install ".[api,auth,cache,config,db,inference,observability]"
 
 # -----------------------------------------------------------------------------
 # Stage 2: runtime
