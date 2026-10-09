@@ -219,6 +219,41 @@ path, and M2 wires it but does not depend on it.
   runtime. This is not exposed; it exists so that a future ADR that adds a
   fourth backend has a place to declare its status.
 
+### Handler thread model (M3.6 amendment)
+
+The protocol is synchronous (above). The handler that calls it is
+not: FastAPI runs an ``async def`` handler on the event loop, and
+the retrieval path — encode, ANN query, re-rank — is blocking. The
+arrangement is:
+
+- **The handler is ``async def``.** The event loop stays free for
+  other requests while this one waits.
+- **One thread hop, not four.** ``anyio.to_thread.run_sync`` runs
+  the entire synchronous pipeline (retrieve, re-rank, fallback)
+  in one call. Wrapping each step separately would pay four
+  hops for one request, and the intermediate results would have to
+  cross the async/sync boundary each time.
+- **The pool is bounded.** ``anyio.CapacityLimiter`` (set to
+  ``sync_thread_limit``, default 20) caps how many requests can
+  occupy a worker thread at once. Without the bound, more threads
+  than the downstream dependency can serve is a longer queue in a
+  different place; the bound is where the queue should be, because
+  it is observable (``recsys_thread_pool_waiting``) and a saturated
+  database is not.
+- **A request-level timeout.** ``anyio.fail_after(request_timeout_seconds)``
+  bounds the total wall clock. Cancelling ``to_thread.run_sync``
+  does not stop the thread — it keeps running to completion and its
+  result is discarded — but the request returns promptly and the
+  latency budget is respected. A future variant that can cancel
+  mid-flight would use a process pool; that is deferred.
+
+The alternative — making the backend async and awaiting each call —
+is what the M2 decision rejected: it would put four ``await``
+points on the request path for no concurrency gain (the
+dependencies are blocking), and every caller of the backend
+(evaluation, scripts, tests) would pay for the handler's
+concurrency model.
+
 ## Alternatives considered
 
 | Option | Why not |

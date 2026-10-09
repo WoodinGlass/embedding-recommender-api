@@ -8,6 +8,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Recommend handler (M3.6.6): ``POST /v1/recommend`` serves the
+  pipeline through a cache lookup before retrieve (ADR-0015
+  amendment: cache stores retrieval candidates, not responses, so
+  a rerank config change does not invalidate the cache), the ANN
+  path on a miss, and the ADR-0020 fallback chain when the
+  pipeline fails. ``meta.source`` is one of the five contract
+  values (``cache``, ``ann``, ``fallback_ann``, ``fallback_cached``,
+  ``none``); the two ``fallback_*`` variants carry ``null`` for
+  ``model_version`` and ``index_version``.
+- ``similar`` handler (``GET /v1/items/{id}/similar``): same
+  pipeline as recommend, single seed, endpoint=``similar`` cache
+  key so the two do not share entries. Never participates in an
+  experiment (``meta.experiment`` is always ``null``).
+- ``events`` handler (``POST /v1/events``): a thin wrapper around
+  ``recsys.events.ingest_events`` (ADR-0018). Request body is
+  ``EventBatch``; the ingester holds the skew window, idempotency,
+  and PII hashing. Handler maps ``IngestValidationError`` to 422,
+  a timeout or any other failure to 503.
+- Fallback chain (M3.6.6c, ADR-0020): ``src/recsys/fallback/``
+  with ``serve_fallback`` (tier 3 = ``fallback_ann`` from
+  ``popularity_snapshot``; tier 4 = ``fallback_cached`` from the
+  in-memory ``PopularityCache``; tier 5 = 503 ``none``). The
+  handler runs it only for server-side failures; a client error
+  (``empty_seeds``/``all_seeds_missing``) is never turned into a
+  popular list.
+- Auth wiring (M3.6.6b.3): ``get_principal`` in ``api/deps.py``
+  validates ``X-API-Key`` (Argon2id or dev plaintext) or
+  ``Authorization: Bearer <jwt>`` against the settings stored on
+  ``app.state``. ``PrincipalDep`` is required by
+  ``/v1/recommend``, ``/v1/items/{id}/similar``, ``/v1/events``,
+  and ``/v1/churn/score``. ``/healthz``, ``/readyz``, and
+  ``/metrics`` stay open.
+- Active index caching (M3.6.6c, ADR-0015 amendment):
+  ``retrieval/active_index.py`` reads ``index_version`` and the
+  ``pgvector`` extension version once at startup and refreshes the
+  index version on a 30 s timer. ``sync_pipeline`` takes both as
+  arguments; ``PgvectorBackend.from_registry`` is no longer called
+  per request. ``ActiveIndexDep`` rejects with a 503 envelope when
+  the value is unknown (database unreachable at startup).
+- Experiment runtime (M3.6.6d, ADR-0017):
+  ``experiments/runtime.py`` with ``run_experiments_for_request``
+  — assign the user, write an exposure row per experiment whose
+  ``log_exposure`` is true. Called from the recommend handler
+  before retrieval so an exposure is written even if the pipeline
+  fails and the fallback chain serves the response. The response
+  carries the first assignment in ``meta.experiment``.
+- Pipeline split (M3.6.6c): ``sync_pipeline`` is a thin wrapper
+  around ``sync_retrieve`` and ``sync_rerank``, with a
+  ``RetrievalOutcome`` type that carries the candidates the
+  handler caches.
+- Metrics: ``recsys_fallback_total``, ``recsys_active_index_staleness_seconds``,
+  ``recsys_active_index_refresh_failures_total``, ``recsys_cache_skip_total{reason}``,
+  ``recsys_experiment_exposure_errors_total{type}``. Cache schema:
+  key is ``recsys:cache:v1:{endpoint}:<blake2b>`` over
+  ``(index_version, endpoint, k_max, filters, sorted-deduped seeds)``;
+  ``hot_config.cache.cache_k_max`` (default 100) bounds the cached
+  candidate window. ``settings.cache_ttl_seconds`` is deprecated
+  in favor of ``hot_config.cache.*``.
+- ADR-0012 amended (M3.6.6f): the handler thread model — ``async def``
+  handler, one ``anyio.to_thread.run_sync`` hop for the whole
+  pipeline, a bounded ``CapacityLimiter`` (``sync_thread_limit``,
+  default 20), a request-level ``anyio.fail_after`` budget. The
+  M2 decision to keep the backend protocol synchronous stands;
+  the amendment records how the handler uses it.
+- ADR-0015 amended (M3.6.6c): cache stores retrieval candidates,
+  not responses; the cache key uses ``k_max`` and deduplicated
+  seeds; the active index version and pgvector version are
+  fetched at startup, not per request; MMR-enabled requests skip
+  the cache in M3.6 with a documented target design.
+- Integration tests ``tests/integration/test_auth_wiring.py``
+  (M3.6.6b.3): 15 tests against the real app factory proving
+  every protected endpoint rejects without a credential and
+  accepts a valid one, and every open endpoint stays open.
 - Experiment assignment (M3.5, ADR-0017): `src/recsys/experiments/`
   with `loader.py` (validate `experiments.yaml` at startup, abort on
   a malformed file), `assignment.py` (deterministic
