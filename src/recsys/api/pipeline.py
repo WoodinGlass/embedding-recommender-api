@@ -384,12 +384,89 @@ def sync_pipeline(
     )
 
 
+@dataclass(frozen=True)
+class RetrievalOutcome:
+    """Retrieve+rerank in one call, with the candidates the handler caches.
+
+    ``result`` is what the response carries. ``candidates`` is what
+    the handler serializes into the cache: present only when the
+    retrieve step produced a non-empty candidate list. A retrieval
+    that failed before the backend, or produced zero candidates,
+    carries ``candidates=None`` — the handler does not cache a
+    failure or an empty list.
+
+    ``index_version`` and ``model_version`` travel with the
+    candidates because the cache value has no room for them (the
+    row shape is id/sim/pop/age, the ADR-0015 § cache schema); the
+    handler reads them off the response when the pipeline succeeds.
+    """
+
+    result: PipelineResult | PipelineFailure
+    candidates: tuple[Candidate, ...] | None
+
+
+def sync_retrieve_and_rerank(
+    *,
+    connection: Any,
+    encoder: _EncoderLike | None,
+    seed_item_ids: Sequence[str],
+    k: int,
+    filters: Mapping[str, str] | None,
+    rerank_config: RerankConfig,
+    reranker: Reranker,
+    popularity_provider: PopularityProvider,
+    recency_provider: RecencyProvider,
+    hnsw_ef_search: int,
+    active_index_version: str | None = None,
+    pgvector_version: Any | None = None,
+) -> RetrievalOutcome:
+    """Run retrieve then rerank; return both the response and the candidates.
+
+    The handler calls this on the miss path (or the MMR skip path).
+    The candidates it returns are what the handler serializes into
+    the cache: the retrieval output, not the re-ranked list. Caching
+    the re-ranked list would serve a stale ordering after a rerank
+    config change (ADR-0015 § Do not cache the re-ranked result).
+    """
+    retrieval = sync_retrieve(
+        connection=connection,
+        encoder=encoder,
+        seed_item_ids=seed_item_ids,
+        k=k,
+        filters=filters,
+        rerank_config=rerank_config,
+        popularity_provider=popularity_provider,
+        recency_provider=recency_provider,
+        hnsw_ef_search=hnsw_ef_search,
+        active_index_version=active_index_version,
+        pgvector_version=pgvector_version,
+    )
+    if isinstance(retrieval, PipelineFailure):
+        return RetrievalOutcome(result=retrieval, candidates=None)
+
+    rerank = sync_rerank(
+        candidates=retrieval.candidates,
+        reranker=reranker,
+        k=k,
+        seed_item_ids=seed_item_ids,
+        index_version=retrieval.index_version,
+        model_version=retrieval.model_version,
+        missing_signals=retrieval.missing_signals,
+    )
+    return RetrievalOutcome(
+        result=rerank,
+        candidates=retrieval.candidates if retrieval.candidates else None,
+    )
+
+
 __all__ = [
     "PipelineFailure",
     "PipelineFailureReason",
     "PipelineResult",
+    "RetrievalOutcome",
     "RetrievalResult",
     "sync_pipeline",
     "sync_rerank",
     "sync_retrieve",
+    "sync_retrieve_and_rerank",
 ]

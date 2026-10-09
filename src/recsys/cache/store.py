@@ -226,7 +226,7 @@ class CacheStore:
     async def store(
         self,
         key: str,
-        items: Sequence[tuple[str, float]],
+        items: Sequence[tuple[Any, ...]],
         *,
         ttl_seconds: int,
     ) -> bool:

@@ -22,7 +22,6 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from recsys.api import pipeline as pipeline_module
 from recsys.api.app import create_app
 from recsys.api.pipeline import PipelineFailure, PipelineResult
 from recsys.config.enums import AppEnv
@@ -110,31 +109,22 @@ class TestHandlerWiring:
     4xx, and a dependency error to a 5xx."""
 
     def _client_with_mock(self, monkeypatch: pytest.MonkeyPatch, result: Any) -> TestClient:
-        def _fake(*args: Any, **kwargs: Any) -> Any:
-            return result
-
-        monkeypatch.setattr(pipeline_module, "sync_pipeline", _fake)
-        # The router imports `sync_pipeline` by name; patch there too.
+        # These tests exercise the *handler's* mapping from a
+        # pipeline outcome to an HTTP response, not the pipeline.
+        # Mocking ``_run_pipeline`` is the right seam since the
+        # cache split: the handler treats it as a black box that
+        # returns (PipelineResult | PipelineFailure, source).
         from recsys.api.routers import recommend as rec_router
 
-        monkeypatch.setattr(rec_router, "sync_pipeline", _fake)
+        async def _fake_run(*_args: Any, **_kwargs: Any) -> tuple[Any, str]:
+            return result, "ann"
 
-        # The app factory stores the pool and the encoder in
-        # closure variables and assigns them to app.state inside
-        # the lifespan. Setting app.state after create_app does
-        # not survive that: the lifespan overwrites it by design.
-        # Patch the *builders* instead — they are called once,
-        # before the lifespan runs.
+        monkeypatch.setattr(rec_router, "_run_pipeline", _fake_run)
+
         import recsys.api.app as app_module
 
         monkeypatch.setattr(app_module, "_build_db_pool", lambda _settings: _FakePool(_FakeConn()))
         monkeypatch.setattr(app_module, "_build_encoder", lambda _settings, _log: _FakeEncoder())
-
-        # Default: the fallback chain produces nothing, so a
-        # PipelineFailure still maps to 503. Tests that want a
-        # fallback response override _run_fallback (see
-        # TestHandlerFallback).
-        from recsys.api.routers import recommend as rec_router
 
         async def _no_fallback(**_kwargs: Any) -> None:
             return None
@@ -142,9 +132,8 @@ class TestHandlerWiring:
         monkeypatch.setattr(rec_router, "_run_fallback", _no_fallback)
 
         app = create_app(_settings())
-        # Every request authenticates; the test bodies do not spell
-        # out the header because the endpoint under test is not the
-        # auth dependency (see tests/unit/test_auth_dependency.py).
+        app.state.active_index = "idx-tests0001"
+        app.state.pgvector_version = "0.6.0"
         return TestClient(app, headers={"X-API-Key": _TEST_API_KEY})
 
     def test_happy_path_returns_200_with_items(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -382,14 +371,12 @@ class TestHandlerFallback:
         pipeline_result: PipelineResult | PipelineFailure,
         fallback_result: FallbackResult | None,
     ) -> TestClient:
-        from recsys.api import pipeline as pipeline_module
         from recsys.api.routers import recommend as rec_router
 
-        def _fake_pipeline(*_args: Any, **_kwargs: Any) -> Any:
-            return pipeline_result
+        async def _fake_run(*_args: Any, **_kwargs: Any) -> tuple[Any, str]:
+            return pipeline_result, "ann"
 
-        monkeypatch.setattr(pipeline_module, "sync_pipeline", _fake_pipeline)
-        monkeypatch.setattr(rec_router, "sync_pipeline", _fake_pipeline)
+        monkeypatch.setattr(rec_router, "_run_pipeline", _fake_run)
 
         async def _fake_fallback(**_kwargs: Any) -> FallbackResult | None:
             return fallback_result
