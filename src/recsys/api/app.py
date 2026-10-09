@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from anyio import CapacityLimiter
 from fastapi import FastAPI
 
 from recsys import __version__
@@ -248,9 +249,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from recsys.monitoring.metrics import ENCODER_MISSING_TOTAL
 
         ENCODER_MISSING_TOTAL.labels(env=settings.app_env.value).inc()
+    #: The bound on how many synchronous worker threads the request
+    #: path may occupy at once. See ADR-0012 (amended) and the
+    #: ``sync_thread_limit`` field for the reasoning: more threads than
+    #: the downstream dependency can serve is a longer queue in a
+    #: different place; the bound is where the queue should be, because
+    #: it is observable (``recsys_thread_pool_waiting``) and a
+    #: saturated database is not.
+    thread_limiter = CapacityLimiter(settings.sync_thread_limit)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.settings = settings
         app.state.limiter = limiter
         app.state.cache = cache_store
         app.state.redis_breaker = redis_breaker
@@ -259,6 +269,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.db_pool = db_pool
         app.state.popularity_cache = popularity_cache
         app.state.encoder = encoder
+        app.state.thread_limiter = thread_limiter
         # Open the pool here, not in ``_build_db_pool``: a failure to
         # connect is a readiness problem (ADR-0019), not a startup one.
         # The pool object stays on state even when its open fails; a
