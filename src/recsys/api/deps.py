@@ -16,6 +16,7 @@ from recsys.cache import CacheStore
 from recsys.config.hot import HotConfigStore
 from recsys.config.settings import Settings, get_settings
 from recsys.experiments import ExperimentsFile
+from recsys.popularity import PopularityCache
 from recsys.rate_limit import TokenBucketLimiter
 from recsys.resilience import CircuitBreaker
 
@@ -57,3 +58,7 @@ CacheStoreDep = Annotated[CacheStore, Depends(get_cache_store)]
 RedisBreakerDep = Annotated[CircuitBreaker, Depends(get_redis_breaker)]
 HotConfigDep = Annotated[HotConfigStore, Depends(get_hot_config)]
 ExperimentsDep = Annotated[ExperimentsFile, Depends(get_experiments)]
+DbPoolDep = Annotated[object, Depends(lambda request: request.app.state.db_pool)]
+PopularityCacheDep = Annotated[
+    PopularityCache, Depends(lambda request: request.app.state.popularity_cache)
+]

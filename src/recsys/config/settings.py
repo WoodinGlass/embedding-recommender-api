@@ -198,6 +198,12 @@ class Settings(BaseSettings):
     #: metadata filters. The default matches the ADR's `POPULARITY_
     #: SNAPSHOT_SIZE` example.
     popularity_snapshot_size: int = Field(default=1_000, ge=1, le=100_000)
+    #: Path to the tier-4 cache file written by
+    #: ``make popularity-refresh`` and read at startup. Relative to
+    #: the process working directory, matching the hot config and
+    #: the experiments file. A missing file is a normal state on a
+    #: fresh checkout; the cache starts empty.
+    popularity_cache_path: str = "artifacts/popularity/snapshot.json"
 
     # ------------------------------------------------------------------ #
     # deployment (ADR-0023)

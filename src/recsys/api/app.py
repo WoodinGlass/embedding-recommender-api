@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -27,6 +28,7 @@ from recsys.experiments import (
 )
 from recsys.monitoring.logging import configure_logging, get_logger
 from recsys.monitoring.tracing import configure_tracing
+from recsys.popularity import PopularityCache, PopularityCacheError
 from recsys.rate_limit import TokenBucketLimiter
 from recsys.resilience import CircuitBreaker, CircuitState
 from recsys.resilience.metrics import (
@@ -50,6 +52,61 @@ def _build_hot_store(settings: Settings, log: object) -> HotConfigStore:
             raise
         log.warning("hot_config.fallback_to_default", path=str(path))  # type: ignore[attr-defined]
         return HotConfigStore(path, initial=default_hot_config())
+
+
+def _build_db_pool(settings: Settings) -> object:
+    """Build a synchronous connection pool. Do not open it here.
+
+    The pool is opened in the lifespan, where a failure is recoverable:
+    a process that boots while PostgreSQL is down should start (its
+    ``/healthz`` answers) and report not-ready via ``/readyz``, not
+    refuse to boot. The readiness contract is ADR-0019; the pool's
+    open is a check it reports, not a startup gate.
+
+    ``psycopg_pool.ConnectionPool`` is the synchronous pool. ADR-0012
+    keeps the retrieval backends synchronous; the handler is a plain
+    ``def`` and FastAPI runs it in a thread pool, so a synchronous pool
+    is the piece that matches. An async pool would force the handler to
+    become async and every call inside it to be awaited, which is the
+    ceremony ADR-0012 chose not to pay.
+    """
+    from psycopg_pool import ConnectionPool
+
+    return ConnectionPool(
+        conninfo=settings.database_url,
+        min_size=1,
+        max_size=5,
+        timeout=settings.db_breaker_timeout_seconds,
+        open=False,
+    )
+
+
+def _build_popularity_cache(settings: Settings, log: object) -> PopularityCache:
+    """Load the tier-4 popularity cache from disk.
+
+    A missing file is expected on a fresh checkout that has not run
+    ``make popularity-refresh`` yet; the cache is empty and tier 4 falls
+    through to tier 5 (ADR-0020 § Tier 4). A malformed file is a
+    different problem — it means a previous refresh wrote something
+    wrong — and is logged at WARNING but does not abort startup, because
+    tier 4 is a fallback: losing it degrades quality, not availability.
+
+    The path is config-relative for the same reason the hot config and
+    experiments file are: the container's WORKDIR holds the artifact
+    directory tree.
+    """
+    path = Path(settings.popularity_cache_path)
+    try:
+        cache = PopularityCache.from_file(path)
+        log.info("popularity.cache.loaded", path=str(path), size=cache.size)  # type: ignore[attr-defined]
+        return cache
+    except PopularityCacheError as exc:
+        log.warning(  # type: ignore[attr-defined]
+            "popularity.cache.missing_or_malformed",
+            path=str(path),
+            error=str(exc),
+        )
+        return PopularityCache.empty()
 
 
 def _build_experiments(settings: Settings, log: object) -> ExperimentsFile:
@@ -128,6 +185,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     hot_store = _build_hot_store(settings, log)
     experiments_file = _build_experiments(settings, log)
+    db_pool = _build_db_pool(settings)
+    popularity_cache = _build_popularity_cache(settings, log)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -136,9 +195,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.redis_breaker = redis_breaker
         app.state.hot_config = hot_store
         app.state.experiments = experiments_file
+        app.state.db_pool = db_pool
+        app.state.popularity_cache = popularity_cache
+        # Open the pool here, not in ``_build_db_pool``: a failure to
+        # connect is a readiness problem (ADR-0019), not a startup one.
+        # The pool object stays on state even when its open fails; a
+        # caller checks ``pool.closed`` before using it and falls
+        # through the ADR-0020 tiers when the database is unreachable.
+        try:
+            db_pool.open(wait=True, timeout=settings.db_breaker_timeout_seconds)  # type: ignore[attr-defined]
+        except Exception as exc:
+            log.warning(
+                "db.pool.open_failed",
+                error=type(exc).__name__,
+                message="continuing; readiness will report not-ready",
+            )
         try:
             yield
         finally:
+            with contextlib.suppress(Exception):
+                db_pool.close()  # type: ignore[attr-defined]
             await limiter.close()
             await cache_store.close()
 
