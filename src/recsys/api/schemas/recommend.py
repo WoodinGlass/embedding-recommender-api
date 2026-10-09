@@ -63,8 +63,13 @@ class RecommendMeta(BaseModel):
         "fallback_cached",
         "none",
     ]
-    model_version: str
-    index_version: str
+    #: ``None`` in fallback responses (``fallback_ann``,
+    #: ``fallback_cached``, ``none``): the fallback path has no
+    #: embedding model and no ANN index, and "n/a" would be a
+    #: magic string a client would try to parse. See contracts.md
+    #: section 2.1 ("Guarantees").
+    model_version: str | None
+    index_version: str | None
     experiment: ExperimentAssignment | None = None
 
 

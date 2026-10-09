@@ -288,3 +288,50 @@ class TestHandlerWithFakeCollaborators:
                 json={"user_id": "u_1", "seed_item_ids": ["i_gone"], "k": 2},
             )
         assert r.status_code == 404
+
+
+# ---------------------------------------------------------------- #
+# RecommendMeta accepts null versions (fallback path)
+# ---------------------------------------------------------------- #
+class TestRecommendMetaSchema:
+    """The schema allows ``None`` for model_version and index_version.
+
+    The ANN path always fills them; the fallback path (ADR-0020)
+    does not use a model or an index, and the field is nullable
+    rather than a magic string. These tests pin the contract so a
+    future change that tightens it back to ``str`` fails loudly.
+    """
+
+    def test_meta_accepts_null_versions(self) -> None:
+        from recsys.api.schemas.recommend import RecommendMeta
+
+        meta = RecommendMeta(
+            source="fallback_ann",
+            model_version=None,
+            index_version=None,
+        )
+        assert meta.model_version is None
+        assert meta.index_version is None
+
+    def test_meta_accepts_filled_versions(self) -> None:
+        from recsys.api.schemas.recommend import RecommendMeta
+
+        meta = RecommendMeta(
+            source="ann",
+            model_version="minilm-onnx-v1+a3f9e021",
+            index_version="idx-a3f9e021",
+        )
+        assert meta.model_version is not None
+        assert meta.index_version is not None
+
+    def test_meta_rejects_missing_version_fields(self) -> None:
+        # Both fields are required (nullable, but not optional): a
+        # caller must say "no version" explicitly rather than omit
+        # the field and let the default silently decide.
+        import pytest
+        from pydantic import ValidationError
+
+        from recsys.api.schemas.recommend import RecommendMeta
+
+        with pytest.raises(ValidationError):
+            RecommendMeta(source="ann")  # type: ignore[call-arg]

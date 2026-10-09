@@ -504,6 +504,15 @@ class RecommendResponse(BaseModel):
   The scores in a fallback response are a placeholder in `(0, 1]`;
   they are not comparable to an ANN score.
 
+- `meta.model_version` and `meta.index_version` are `null` in a
+  fallback response. The fallback path does not use an embedding
+  model or an ANN index; the versions would be meaningless. The
+  field is nullable rather than a magic string (`"n/a"`, `""`,
+  `"fallback"`) so a client can distinguish "no model was used"
+  from "a model with an unusual name" — and so a metric can
+  group by version without a bucket that mixes nulls with real
+  values.
+
 - `meta.experiment` echoes the assignment made by the assignment function;
   it is `null` when no experiment is active for this user.
 
