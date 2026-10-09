@@ -27,6 +27,7 @@ from recsys.api.app import create_app
 from recsys.api.pipeline import PipelineFailure, PipelineResult
 from recsys.config.enums import AppEnv
 from recsys.config.settings import Settings
+from recsys.fallback import FallbackResult
 
 #: The API key every TestClient in this module sends.
 _TEST_API_KEY = "test-api-key"
@@ -128,6 +129,18 @@ class TestHandlerWiring:
 
         monkeypatch.setattr(app_module, "_build_db_pool", lambda _settings: _FakePool(_FakeConn()))
         monkeypatch.setattr(app_module, "_build_encoder", lambda _settings, _log: _FakeEncoder())
+
+        # Default: the fallback chain produces nothing, so a
+        # PipelineFailure still maps to 503. Tests that want a
+        # fallback response override _run_fallback (see
+        # TestHandlerFallback).
+        from recsys.api.routers import recommend as rec_router
+
+        async def _no_fallback(**_kwargs: Any) -> None:
+            return None
+
+        monkeypatch.setattr(rec_router, "_run_fallback", _no_fallback)
+
         app = create_app(_settings())
         # Every request authenticates; the test bodies do not spell
         # out the header because the endpoint under test is not the
@@ -256,6 +269,18 @@ class TestHandlerWithFakeCollaborators:
             lambda _settings: _FakePool(_FakeConn(rows=seed_rows)),
         )
         monkeypatch.setattr(app_module, "_build_encoder", lambda _settings, _log: _FakeEncoder())
+
+        # Explicit: the fallback chain is not what these tests
+        # exercise. Keeping it deterministic (return None) means
+        # these tests do not depend on whether the popularity
+        # snapshot file is present on disk.
+        from recsys.api.routers import recommend as rec_router
+
+        async def _no_fallback(**_kwargs: Any) -> None:
+            return None
+
+        monkeypatch.setattr(rec_router, "_run_fallback", _no_fallback)
+
         app = create_app(_settings())
         return TestClient(app, headers={"X-API-Key": _TEST_API_KEY})
 
@@ -335,3 +360,125 @@ class TestRecommendMetaSchema:
 
         with pytest.raises(ValidationError):
             RecommendMeta(source="ann")  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------- #
+# fallback chain (ADR-0020 tiers 3 and 4)
+# ---------------------------------------------------------------- #
+class TestHandlerFallback:
+    """The handler maps a non-None _run_fallback to 200 with the
+    tier's source and null versions, and maps None to 503."""
+
+    def _client(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        pipeline_result: PipelineResult | PipelineFailure,
+        fallback_result: FallbackResult | None,
+    ) -> TestClient:
+        from recsys.api import pipeline as pipeline_module
+        from recsys.api.routers import recommend as rec_router
+
+        def _fake_pipeline(*_args: Any, **_kwargs: Any) -> Any:
+            return pipeline_result
+
+        monkeypatch.setattr(pipeline_module, "sync_pipeline", _fake_pipeline)
+        monkeypatch.setattr(rec_router, "sync_pipeline", _fake_pipeline)
+
+        async def _fake_fallback(**_kwargs: Any) -> FallbackResult | None:
+            return fallback_result
+
+        monkeypatch.setattr(rec_router, "_run_fallback", _fake_fallback)
+
+        import recsys.api.app as app_module
+
+        monkeypatch.setattr(app_module, "_build_db_pool", lambda _settings: _FakePool(_FakeConn()))
+        monkeypatch.setattr(app_module, "_build_encoder", lambda _settings, _log: _FakeEncoder())
+        app = create_app(_settings())
+        return TestClient(app, headers={"X-API-Key": _TEST_API_KEY})
+
+    def test_fallback_ann_returns_200_with_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = self._client(
+            monkeypatch,
+            pipeline_result=PipelineFailure("ann_error"),
+            fallback_result=FallbackResult(
+                source="fallback_ann",
+                items=(("i_pop1", 0.9), ("i_pop2", 0.5)),
+            ),
+        )
+        with client:
+            r = client.post(
+                "/v1/recommend",
+                json={"user_id": "u_1", "seed_item_ids": ["i_seed"], "k": 2},
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["meta"]["source"] == "fallback_ann"
+        assert body["meta"]["model_version"] is None
+        assert body["meta"]["index_version"] is None
+        assert [it["item_id"] for it in body["items"]] == ["i_pop1", "i_pop2"]
+        assert [it["rank"] for it in body["items"]] == [1, 2]
+
+    def test_fallback_cached_returns_200_with_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = self._client(
+            monkeypatch,
+            pipeline_result=PipelineFailure("ann_error"),
+            fallback_result=FallbackResult(
+                source="fallback_cached",
+                items=(("i_mem1", 0.8),),
+            ),
+        )
+        with client:
+            r = client.post(
+                "/v1/recommend",
+                json={"user_id": "u_1", "seed_item_ids": ["i_seed"], "k": 5},
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["meta"]["source"] == "fallback_cached"
+        assert body["meta"]["model_version"] is None
+        assert body["meta"]["index_version"] is None
+
+    def test_both_tiers_empty_returns_503(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = self._client(
+            monkeypatch,
+            pipeline_result=PipelineFailure("ann_error"),
+            fallback_result=None,
+        )
+        with client:
+            r = client.post(
+                "/v1/recommend",
+                json={"user_id": "u_1", "seed_item_ids": ["i_seed"], "k": 5},
+            )
+        assert r.status_code == 503
+        assert r.json()["detail"]["code"] == "unavailable"
+
+    def test_client_error_does_not_trigger_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A 400/404 must not be turned into a popular list."""
+        from recsys.api.routers import recommend as rec_router
+
+        called: list[bool] = []
+
+        async def _should_not_be_called(**_kwargs: Any) -> FallbackResult | None:
+            called.append(True)
+            return None
+
+        # Override the default set inside _client by patching before
+        # the fixture runs. Rebuild the client with the pipeline
+        # returning a client error.
+        client = self._client(
+            monkeypatch,
+            pipeline_result=PipelineFailure("empty_seeds"),
+            fallback_result=None,
+        )
+        # The helper above set _run_fallback; replace it with one
+        # that records whether it is called.
+        monkeypatch.setattr(rec_router, "_run_fallback", _should_not_be_called)
+
+        with client:
+            r = client.post(
+                "/v1/recommend",
+                json={"user_id": "u_1", "seed_item_ids": [], "k": 5},
+            )
+        assert r.status_code == 400
+        assert called == [], "fallback must not run for a client error"

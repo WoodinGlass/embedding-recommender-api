@@ -40,7 +40,9 @@ from recsys.api.schemas.recommend import (
     RecommendRequest,
     RecommendResponse,
 )
+from recsys.fallback import FallbackResult, serve_fallback
 from recsys.monitoring.logging import get_logger
+from recsys.popularity import PopularityCache
 from recsys.retrieval.providers import (
     PgRecencyProvider,
     SyntheticPopularityProvider,
@@ -55,20 +57,29 @@ log = get_logger(__name__)
 def _to_response(
     *,
     request_id: str,
-    result: PipelineResult,
+    source: str,
+    model_version: str | None,
+    index_version: str | None,
+    items: tuple[tuple[str, float], ...],
 ) -> RecommendResponse:
-    """Turn a ``PipelineResult`` into the response schema."""
-    items = [
+    """Shape a response for the tier that produced ``items``.
+
+    ``source`` and the version fields are the caller's: the ANN
+    path passes ``"ann"`` with the versions from the pipeline;
+    the fallback path passes its source with ``None`` versions
+    (ADR-0020 — no model, no index is what a fallback is).
+    """
+    response_items = [
         RecommendItem(item_id=iid, score=float(score), rank=i + 1)
-        for i, (iid, score) in enumerate(result.items)
+        for i, (iid, score) in enumerate(items)
     ]
     return RecommendResponse(
         request_id=request_id,
-        items=items,
+        items=response_items,
         meta=RecommendMeta(
-            source="ann",
-            model_version=result.model_version,
-            index_version=result.index_version,
+            source=source,  # type: ignore[arg-type]
+            model_version=model_version,
+            index_version=index_version,
             experiment=None,
         ),
     )
@@ -149,6 +160,76 @@ async def _run_pipeline(
         return PipelineFailure("ann_error", detail=f"{type(exc).__name__}: {exc}"[:200])
 
 
+def _sync_fallback(
+    pool: object,
+    popularity_cache: PopularityCache,
+    *,
+    k: int,
+    filters: dict[str, str] | None,
+) -> FallbackResult | None:
+    """Run the tier-3 / tier-4 chain. Called on a worker thread.
+
+    The connection is acquired here, not inside ``serve_fallback``,
+    so its lifetime covers exactly the tier-3 read. When the pool
+    is closed (the app booted with the database unreachable) or a
+    connection cannot be acquired, ``serve_fallback`` runs with
+    ``connection=None``: tier 3 is skipped and tier 4 serves from
+    process memory. That is the degraded path ADR-0020 exists for.
+    """
+    try:
+        pool_ctx = pool.connection()  # type: ignore[attr-defined]
+    except Exception:
+        return serve_fallback(
+            connection=None,
+            popularity_cache=popularity_cache,
+            k=k,
+            filters=filters,
+        )
+    try:
+        with pool_ctx as conn:
+            return serve_fallback(
+                connection=conn,
+                popularity_cache=popularity_cache,
+                k=k,
+                filters=filters,
+            )
+    except Exception:
+        # The pool's context manager can raise on entry or exit
+        # (a pool shutdown between connection() and __enter__).
+        # Fall to tier 4 rather than 500.
+        return serve_fallback(
+            connection=None,
+            popularity_cache=popularity_cache,
+            k=k,
+            filters=filters,
+        )
+
+
+async def _run_fallback(
+    *,
+    pool: object,
+    popularity_cache: PopularityCache,
+    limiter: anyio.CapacityLimiter,
+    k: int,
+    filters: dict[str, str] | None,
+) -> FallbackResult | None:
+    """Offload the synchronous fallback to a bounded worker thread.
+
+    The tier-3 read is a database query and the tier-4 read is a
+    comprehension over an in-memory list; neither belongs on the
+    event loop. Both share the limiter the pipeline uses so a
+    burst of fallbacks cannot starve the ANN path.
+    """
+    call = partial(
+        _sync_fallback,
+        pool,
+        popularity_cache,
+        k=k,
+        filters=filters,
+    )
+    return await anyio.to_thread.run_sync(call, limiter=limiter)
+
+
 @router.post(
     "/recommend",
     response_model=RecommendResponse,
@@ -197,7 +278,13 @@ async def recommend(
             n_items=len(result.items),
             index_version=result.index_version,
         )
-        return _to_response(request_id=request_id, result=result)
+        return _to_response(
+            request_id=request_id,
+            source="ann",
+            model_version=result.model_version,
+            index_version=result.index_version,
+            items=result.items,
+        )
 
     # Client errors.
     if result.reason == "empty_seeds":
@@ -219,9 +306,35 @@ async def recommend(
             },
         )
 
-    # Dependency errors. The fallback chain replaces this 503 in
-    # M3.6.6c; the reason is logged so the interim behavior is
-    # traceable.
+    # Server-side failure. Try the fallback chain (ADR-0020
+    # tiers 3 and 4) before giving up. Only server-side reasons
+    # reach here: ``empty_seeds`` and ``all_seeds_missing`` were
+    # raised above as client errors, and a client error must not
+    # be turned into a popular list.
+    fallback = await _run_fallback(
+        pool=request.app.state.db_pool,
+        popularity_cache=request.app.state.popularity_cache,
+        limiter=limiter,
+        k=body.k,
+        filters=(body.filters.model_dump(exclude_none=True) if body.filters is not None else None),
+    )
+    if fallback is not None:
+        log.info(
+            "recommend.fallback",
+            request_id=request_id,
+            source=fallback.source,
+            n_items=len(fallback.items),
+            pipeline_reason=result.reason,
+        )
+        return _to_response(
+            request_id=request_id,
+            source=fallback.source,
+            model_version=None,
+            index_version=None,
+            items=fallback.items,
+        )
+
+    # Every tier failed. This is the 503 from ADR-0020 § tier 5.
     log.warning(
         "recommend.unavailable",
         request_id=request_id,
