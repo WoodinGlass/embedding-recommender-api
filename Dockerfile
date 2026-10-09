@@ -67,6 +67,13 @@ WORKDIR /home/recsys
 # secret-marker scan rejects it at load time if one appears.
 COPY --chown=recsys:recsys config/ ./config/
 
+# experiments.yaml is read at startup (ADR-0017). Its path is relative
+# to WORKDIR, and in prod a missing file is a startup failure
+# (matching the hot config: a missing file is a misconfiguration, not
+# a fallback situation). The file is committed and carries no
+# secrets; the loader rejects an unknown field at load time.
+COPY --chown=recsys:recsys experiments.yaml ./experiments.yaml
+
 EXPOSE 8000
 
 # Liveness-only healthcheck. Readiness (which will check the DB and index from
