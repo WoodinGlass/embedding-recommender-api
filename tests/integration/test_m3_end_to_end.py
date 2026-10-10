@@ -91,10 +91,15 @@ def test_readyz_returns_503_or_200_but_never_500(real_client: TestClient) -> Non
 # recommend: full stack, empty catalog
 # ---------------------------------------------------------------- #
 def test_recommend_with_no_active_index_returns_503(real_client: TestClient, clean_db: Any) -> None:
-    """The pipeline returns ``no_active_index`` (no row is active),
-    the fallback chain produces nothing, and the handler returns
-    the 503 ``unavailable`` envelope. This exercises the whole
-    stack: middleware, auth, pool, pipeline, fallback chain."""
+    """A bare CI database (migrations applied, no catalog, no active
+    index) makes the pipeline fail before it produces items. The
+    exact reason depends on what the environment has provisioned:
+    without an ONNX artifact the pipeline returns
+    ``encoder_unavailable`` before it looks at the index; with one
+    it returns ``no_active_index``. Either way the fallback chain
+    produces nothing and the handler returns the 503
+    ``unavailable`` envelope. This exercises the whole stack:
+    middleware, auth, pool, pipeline, fallback chain."""
     r = real_client.post(
         "/v1/recommend",
         json={"user_id": "u_1", "seed_item_ids": ["i_1"], "k": 2},
@@ -102,7 +107,9 @@ def test_recommend_with_no_active_index_returns_503(real_client: TestClient, cle
     assert r.status_code == 503
     detail = r.json()["detail"]
     assert detail["code"] == "unavailable"
-    assert "no_active_index" in detail["message"]
+    assert "no_active_index" in detail["message"] or "encoder_unavailable" in detail["message"], (
+        f"unexpected reason: {detail['message']!r}"
+    )
     assert detail["request_id"]
 
 
