@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **M3 complete.** The production API milestone is done: auth (API key +
+  JWT), rate limiting, caching, the five-tier fallback chain, the
+  re-ranker, experiment assignment and exposure, the three-state
+  readiness contract, and the `recommend` / `similar` / `events`
+  handlers. The M3 exit criterion ("integration tests are green") is
+  exercised by the CI `integration` job against real PostgreSQL
+  (pgvector) and Redis. See the README's milestone table for the
+  proof of each criterion.
+- `tests/integration/test_m3_end_to_end.py` (M3.8): the full app
+  factory, middleware stack, auth, connection pool, and readiness
+  checks against real PostgreSQL and Redis. Proves the
+  empty-catalog behavior — no active index returns the 503
+  `unavailable` envelope; no credential returns 401; the events
+  endpoint accepts a batch and returns the ack shape.
 - Recommend handler (M3.6.6): ``POST /v1/recommend`` serves the
   pipeline through a cache lookup before retrieve (ADR-0015
   amendment: cache stores retrieval candidates, not responses, so

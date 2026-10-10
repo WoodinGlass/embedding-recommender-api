@@ -6,7 +6,7 @@
 
 Embedding-based recommendation service with low-latency ANN retrieval (target p95 < 200 ms), re-ranking, statistically valid A/B testing, monitoring, and automated deployment (Docker + CI/CD). It ships with offline evaluation, model/index versioning, fallbacks, and a churn-risk extension.
 
-> **Status:** in development. M0 (Foundation), M1 (Embedding pipeline), and M2 (Retrieval and offline evaluation) are complete; see [Milestones](#milestones). Performance figures for the served path are targets until the M4 benchmark is published.
+> **Status:** in development. M0 (Foundation), M1 (Embedding pipeline), M2 (Retrieval and offline evaluation), and M3 (Production API) are complete; see [Milestones](#milestones). Performance figures for the served path are targets until the M4 benchmark is published.
 
 ## What this is / is not
 
@@ -518,7 +518,7 @@ were considered and rejected — see the ADRs under [`docs/adr/`](docs/adr/).
 | M0 | Foundation | Repo, CI (lint, type check, test), Docker, pre-commit, first ADR | CI is green on the scaffold; the `docker-build` job builds the image and serves `/healthz`, `/readyz`, and `/metrics` in a container | Done |
 | M1 | Embedding pipeline | Batch and incremental embedding, model/index versioning, golden set | Re-running the pipeline produces identical results | Done |
 | M2 | Retrieval and offline evaluation | pgvector HNSW, benchmark vs FAISS, Recall@k / NDCG / MRR | Metrics are documented and enforced as a CI gate | Done |
-| M3 | Production API | Auth, rate limiting, caching, fallback, health checks, re-ranker arm | Integration tests are green | Planned |
+| M3 | Production API | Auth, rate limiting, caching, fallback, health checks, re-ranker arm | Integration tests are green | Done |
 | M4 | Observability and load test | Prometheus/Grafana, tracing, Locust | p95 < 200 ms at the target RPS, with evidence committed in `docs/` | Planned |
 | M5 | A/B testing | Assignment, logging, statistical analysis, dashboard | Simulation reaches the correct conclusion on a known effect | Planned |
 | M6 | Deployment | Automated CD, staging to prod, rollback, blue/green index | A merge to `main` reaches staging automatically; production promotion, rollback, and index swap are demonstrated with no downtime | Planned |
@@ -546,6 +546,17 @@ were considered and rejected — see the ADRs under [`docs/adr/`](docs/adr/).
 > `evaluation` job fails the build when any metric is below its threshold or
 > its absolute floor, when the report's golden set version does not match the
 > threshold file's, or when a required system is missing from the report.
+
+> **Note on the M3 exit criteria.** "Integration tests are green" is proven
+> by the CI `integration` job, which provisions real PostgreSQL (pgvector)
+> and Redis and runs `tests/integration/`. The M3 additions to that suite
+> are `test_auth_wiring.py` (15 tests: every protected endpoint rejects
+> without a credential and accepts a valid one, every open endpoint stays
+> open) and `test_m3_end_to_end.py` (real app factory, middleware stack,
+> auth, connection pool, readiness checks, and the recommend / events /
+> similar handlers against a database with migrations applied and no active
+> index). The evaluation gate remains separate and continues to be the M2
+> exit criterion.
 
 ## License
 

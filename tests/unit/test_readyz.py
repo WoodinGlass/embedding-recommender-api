@@ -125,7 +125,19 @@ def _patch_health_checks(
 def test_readyz_reports_not_ready_without_database(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No database: db and index are not ready, aggregate is 503."""
+    """No database pool: db and index are not_ready, aggregate 503.
+
+    The db pool builder is patched to a closed pool so the test is
+    deterministic even when DATABASE_URL points at a live server
+    (unit tests must not depend on external services; the check-
+    markers gate enforces that).
+    """
+    import recsys.api.app as app_module
+
+    class _ClosedPool:
+        closed = True
+
+    monkeypatch.setattr(app_module, "_build_db_pool", lambda _s: _ClosedPool())
     monkeypatch.setattr(
         "recsys.api.routers.health.check_redis",
         lambda _url, **_kw: _async({"ok": True, "required": False}),
