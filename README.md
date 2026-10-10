@@ -14,7 +14,7 @@ Embedding-based recommendation service with low-latency ANN retrieval (target p9
 
 - A production-style recommendation service: embed a catalog, retrieve neighbors with ANN search and metadata filters, re-rank, and serve the result through FastAPI.
 - A reference for the full ML-serving lifecycle: versioned models and indexes, offline evaluation as a CI gate, A/B experimentation, observability, graceful degradation, and zero-downtime index swaps.
-- A single-node system sized for catalogs of 100k+ items that runs locally with `make up`.
+- A single-node system sized for catalogs of 100k+ items.
 - A foundation reused for a second use case: a churn-risk scoring endpoint on the same infrastructure.
 
 **This is not**
@@ -30,12 +30,12 @@ Embedding-based recommendation service with low-latency ANN retrieval (target p9
 1. **Embedding pipeline** — batch and incremental catalog embedding with versioned models and indexes, atomic commit, and a three-tier determinism contract.
 2. **Similarity search with metadata filters** — pgvector HNSW with a bounded, parameterized filter strategy; target p95 < 200 ms on 100k+ items.
 3. **Offline evaluation** — Recall@k, NDCG@k, MRR, and ANN fidelity against a versioned golden set, with baselines and thresholds that fail the build.
-4. **Re-ranking** — popularity, recency, and diversity (MMR). Ships in M3.
-5. **Graceful degradation** — cold-start and fallback paths when the index or Redis is down.
-6. **A/B testing** — deterministic assignment (hashed user ID), SRM check, sample-size calculation, significance tests, and guardrail metrics.
-7. **API hardening** — authentication, rate limiting, input validation, and health/readiness endpoints.
-8. **Observability** — latency, cache hit rate, error rate, embedding drift, and alerts.
-9. **Churn-risk extension** — separate endpoint, evaluated with AUC and calibration.
+4. **Re-ranking** — popularity, recency, and diversity (MMR) composed over the retrieval candidate list. Configurable weights, hot-reloadable via `config/hot.yaml` (ADR-0016, ADR-0022).
+5. **Five-tier fallback chain** — `cache` → `ann` → `fallback_ann` (DB snapshot) → `fallback_cached` (in-memory) → `none` (503). Client errors never enter the chain (ADR-0020).
+6. **A/B testing** — deterministic assignment (hashed user ID), SRM check, sample-size calculation, significance tests, and guardrail metrics. Assignment and exposure logging land in M3.6; the statistical analysis in M5.
+7. **API hardening** — authentication (API key + JWT), Redis-backed rate limiting, input validation, and readiness/liveness endpoints (ADR-0013, ADR-0014, ADR-0019).
+8. **Observability** — latency histograms, cache hit rate, fallback rate, error rate, and embedding drift, with alerts and Grafana dashboards. Metrics and logs are wired in M3; dashboards, alerts, and drift land in M4 (ADR-0021).
+9. **Churn-risk extension** — separate endpoint, evaluated with AUC and calibration. *(M7)*
 10. **Zero-downtime index swap** — blue/green indexes with instant rollback.
 
 ## Architecture
@@ -61,7 +61,7 @@ flowchart TB
     RC -- miss --> ANN["ANN retrieval<br/>+ metadata filter"]
     ANN --> RR["Re-ranker<br/>popularity, recency, diversity"]
     RR --> OUT
-    ANN -. index or DB down .-> FB["Fallback<br/>popularity, cold-start"]
+    ANN -. index or DB down .-> FB["Fallback<br/>tier 3 (DB) then tier 4 (memory)"]
     FB --> OUT
   end
 
@@ -72,11 +72,11 @@ flowchart TB
 **Request flow**
 
 1. Authenticate, rate-limit, and validate the request.
-2. Assign the user to an experiment variant (deterministic hash of `user_id`).
-3. Look up Redis. The cache key includes `index_version` and the experiment variant, so index swaps and A/B arms never share entries. If Redis is down, the cache is bypassed instead of failing the request.
-4. On a miss, run the filtered ANN query on the active index, then re-rank.
-5. If the index or database is unavailable, or the ANN timeout is hit, serve the popularity/cold-start fallback.
-6. Return the result with `meta.source` (`cache`, `ann`, or `fallback`), and emit metrics, traces, logs, and the experiment exposure event.
+2. Assign the user to an experiment variant (deterministic hash of `user_id`) and write an exposure row (ADR-0017). A stopped or disabled experiment still produces an assignment with `log_exposure = false`, so the response carries the variant the user would have seen without touching the database.
+3. Look up Redis. The cache key includes the active `index_version` and the endpoint, so index swaps never serve stale candidates (ADR-0015). The cache stores retrieval *candidates*, not the re-ranked list, so a hot-reload of the rerank config does not invalidate entries. If Redis is down, the cache is bypassed (a shared circuit breaker prevents repeated timeouts).
+4. On a miss, run the filtered ANN query on the active index, then re-rank. On a hit, skip retrieve and run only the re-ranker.
+5. If the ANN path fails (timeout, no active index, encoder unavailable, database unreachable), the fallback chain tries the popular-items snapshot (tier 3) and then the in-memory popularity cache (tier 4). A client error — empty seeds or all seeds missing — returns 400/404 and never enters the chain.
+6. Return the result with `meta.source` (`cache`, `ann`, `fallback_ann`, `fallback_cached`, or `none`), and emit metrics, traces, logs, and the experiment exposure event. `model_version` and `index_version` are `null` in a fallback response: no model or index was used.
 
 ## Tech stack
 
@@ -97,32 +97,47 @@ flowchart TB
 ```text
 embedding-recommender-api/
 ├── src/recsys/
-│   ├── api/                # routers, schemas, middleware (auth, rate limit)
+│   ├── api/                # routers, schemas, middleware, deps, readiness
+│   │   ├── auth/           # API key + JWT (ADR-0013)
+│   │   ├── middleware/     # request context, access log, rate limit
+│   │   ├── routers/        # recommend, events, churn, health, metrics
+│   │   ├── schemas/        # Pydantic v2 request/response models
+│   │   ├── deps.py         # dependency providers (settings, cache, pool, principal)
+│   │   ├── pipeline.py     # sync_retrieve / sync_rerank / sync_pipeline
+│   │   └── readiness.py    # check_db / check_index / check_redis + aggregate
 │   ├── embeddings/         # preprocess, encoder, ONNX export, pipeline, artifacts
 │   ├── evaluation/         # metrics, golden_set, baselines, thresholds, runner
 │   ├── retrieval/          # base, registry, filters, identity, pgvector,
-│   │                       # numpy_backend, build, promote, rerank stub
-│   ├── fallback/           # popularity and cold-start (M3)
-│   ├── experiments/        # assignment, logging, stats analysis (M5)
+│   │                       # numpy_backend, build, promote, rerank, providers,
+│   │                       # active_index
+│   ├── fallback/           # tier-3 / tier-4 chain (ADR-0020)
+│   ├── experiments/        # assignment, loader, exposure, runtime (ADR-0017)
+│   ├── events/             # batch event ingestion (ADR-0018)
+│   ├── popularity/         # snapshot reader, in-memory cache, refresh
+│   ├── cache/              # cache-aside store, key builder, TTL jitter (ADR-0015)
+│   ├── resilience/         # circuit breaker (ADR-0015)
+│   ├── rate_limit/         # token bucket in Redis via Lua (ADR-0014)
 │   ├── churn/              # features, model, scoring (M7)
 │   ├── monitoring/         # structlog, Prometheus registry, drift (M4)
-│   └── config/             # Pydantic Settings, enum validation, prod guard
+│   └── config/             # Pydantic Settings, hot config store, enum validation
 ├── pipelines/              # orchestration wrappers (M6)
 ├── evaluation/
 │   ├── golden_set/v1.jsonl # 20 queries, one per topic (ADR-0009)
 │   ├── thresholds.yaml     # gate thresholds (ADR-0010)
 │   ├── thresholds_history.yaml
 │   └── report.json         # generated by `make eval`; not committed
-├── migrations/             # Alembic env + versions/0001_pgvector_schema.py
+├── migrations/             # Alembic env + versions (0001–0004)
 ├── data/
 │   └── sample/             # sample catalog; real data via DVC
 ├── scripts/                # generate_sample_catalog, export_onnx, embed,
 │                           # build_index, promote_index, rollback_index,
-│                           # eval, bench_faiss, render_benchmark, check_markers
+│                           # refresh_popularity, eval, bench_faiss,
+│                           # render_benchmark, check_markers
 ├── tests/
 │   ├── unit/               # fast, no external services
 │   ├── integration/        # real PostgreSQL (pgvector) and Redis; encoder parity;
-│   │                       # index lifecycle; backend agreement; determinism tiers
+│   │                       # index lifecycle; backend agreement; determinism tiers;
+│   │                       # auth wiring; end-to-end M3
 │   └── load/               # Locust / k6 scenarios (M4)
 ├── deploy/
 │   ├── docker/
@@ -132,6 +147,7 @@ embedding-recommender-api/
 ├── docs/
 │   ├── decisions.md        # pre-flight design decisions (locked)
 │   ├── contracts.md        # data, API, config, telemetry contracts
+│   ├── production-api.md   # M3 design doc
 │   ├── embedding-pipeline.md       # M1 design
 │   ├── retrieval-and-evaluation.md # M2 design
 │   ├── runbook.md          # incident response procedures
@@ -139,7 +155,7 @@ embedding-recommender-api/
 │   ├── faiss-benchmark.json        # raw measurement (ADR-0011)
 │   ├── faiss-benchmark.md          # generated from the JSON
 │   ├── api.md              # (M3)
-│   └── adr/                # ADR-0001 through ADR-0012
+│   └── adr/                # ADR-0001 through ADR-0025
 ├── .github/
 │   ├── workflows/          # ci.yml (cd.yml, security.yml in M6/M8)
 │   └── dependabot.yml      # (M8)
@@ -148,7 +164,7 @@ embedding-recommender-api/
 ├── .dockerignore
 ├── pyproject.toml
 ├── Dockerfile
-├── docker-compose.yml      # (M3)
+├── docker-compose.yml
 ├── alembic.ini
 ├── Makefile
 ├── CHANGELOG.md
@@ -157,7 +173,7 @@ embedding-recommender-api/
 
 ## Quickstart
 
-Prerequisites: Docker with Compose v2, GNU Make, and Python 3.11+ (for local development).
+Prerequisites: Python 3.11+, GNU Make, PostgreSQL 16 with pgvector, and Redis (for the served path). Docker is optional and only needed for the container build.
 
 ```bash
 git clone https://github.com/WoodinGlass/embedding-recommender-api.git
@@ -188,8 +204,6 @@ print(json.loads(out.stdout.strip())['index_version'])
 make eval
 ```
 
-The full local stack (API, PostgreSQL with pgvector, Redis, Prometheus, Grafana) starts in M3 once the retrieval path is wired into the API.
-
 Request recommendations (use a key from `API_KEYS` in your `.env`):
 
 ```bash
@@ -199,7 +213,7 @@ curl -X POST http://localhost:8000/v1/recommend \
   -d '{"user_id": "u_123", "seed_item_ids": ["i_456"], "k": 10, "filters": {"category": "books"}}'
 ```
 
-Local endpoints (M3): API docs at `http://localhost:8000/docs`, Prometheus on `:9090`, Grafana on `:3000`.
+Interactive OpenAPI docs are served at `http://localhost:8000/docs`. Prometheus and Grafana land in M4.
 
 ## Configuration
 
@@ -210,18 +224,21 @@ Settings are read from environment variables (see `.env.example`). Never commit 
 | `APP_ENV` | Selects the settings profile in `src/recsys/config/` | `dev` |
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql://recsys:recsys@postgres:5432/recsys` |
 | `REDIS_URL` | Redis connection string | `redis://redis:6379/0` |
-| `API_KEYS` | Comma-separated API keys (or use JWT instead) | `dev-key-1` |
+| `API_KEYS` | Semicolon-separated API key hashes (Argon2id) or plaintext in dev | `dev-key-1;dev-key-2` |
+| `API_KEYS_ADMIN` | Keys with the admin scope | — |
 | `JWT_SECRET` | Signing secret when JWT auth is enabled | — |
-| `RATE_LIMIT_PER_MINUTE` | Per-key request limit | `600` |
+| `JWT_ALGORITHM` | JWT signing algorithm | `HS256` |
+| `JWT_MAX_AGE_SECONDS` | `iat` freshness bound | `86400` |
 | `EMBEDDING_MODEL` | sentence-transformers model exported to ONNX | `sentence-transformers/all-MiniLM-L6-v2` |
 | `EMBEDDING_ONNX_PATH` | Directory holding `model.onnx` and its sidecars | `artifacts/onnx/sentence-transformers__all-MiniLM-L6-v2` |
-| `EMBEDDING_BATCH_SIZE` | Encode batch size for the pipeline | `64` |
 | `INDEX_BACKEND` | `pgvector` (default) or `faiss` (benchmark) | `pgvector` |
-| `HNSW_M`, `HNSW_EF_CONSTRUCTION` | Index build parameters | `16`, `64` |
 | `HNSW_EF_SEARCH` | Query-time recall/latency knob | `100` |
-| `ANN_TIMEOUT_MS` | Hard timeout before falling back | `120` |
-| `CACHE_TTL_SECONDS` | Redis cache TTL | `300` |
+| `USER_ID_HASH_SALT` | HMAC salt for user id hashing in events and exposures | — |
+| `USER_ID_HASH_SALT_VERSION` | Salt version (bumped on rotation) | `1` |
+| `EXPERIMENT_DISABLED` | Kill switch: treat every experiment as stopped | `0` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OpenTelemetry collector endpoint | `http://otel-collector:4317` |
+
+Rerank weights, MMR flags, rate limits, and cache TTLs come from `config/hot.yaml` (ADR-0022), not from environment variables. The file is polled; a change takes effect without a restart.
 
 ## API
 
@@ -230,9 +247,10 @@ Settings are read from environment variables (see `.env.example`). Never commit 
 | `POST` | `/v1/recommend` | API key / JWT | Top-k recommendations with metadata filters |
 | `GET` | `/v1/items/{item_id}/similar` | API key / JWT | Item-to-item similarity |
 | `POST` | `/v1/events` | API key / JWT | Log `impression`, `click`, and `conversion` events for experiments |
-| `POST` | `/v1/churn/score` | API key / JWT | Churn-risk score for a user (extension) |
-| `GET` | `/healthz` | None | Liveness |
-| `GET` | `/readyz` | None | Readiness: database reachable and an active index loaded (Redis status is reported, not required) |
+| `POST` | `/v1/churn/score` | API key / JWT | Churn-risk score for a user (extension, M7) |
+| `GET` | `/livez` | None | Liveness |
+| `GET` | `/healthz` | None | Liveness (alias of `/livez`) |
+| `GET` | `/readyz` | None | Readiness: `db` (required), `index` (required), `encoder` (prod-required), `redis` (optional); three-state aggregate |
 | `GET` | `/metrics` | Internal | Prometheus metrics |
 
 Example response from `POST /v1/recommend`:
@@ -253,10 +271,9 @@ Example response from `POST /v1/recommend`:
 }
 ```
 
-Errors: `401`/`403` for auth, `422` for validation, `429` with `Retry-After` when rate limited, and `503` only when both ANN retrieval and the fallback fail. Interactive OpenAPI docs are served at `/docs`; a summary lives in `docs/api.md`.
+In a fallback response (`meta.source` is `fallback_ann` or `fallback_cached`), `model_version` and `index_version` are `null`. The field is nullable rather than a magic string (`"n/a"`, `""`, `"fallback"`) so a metric can filter `WHERE model_version IS NULL` and a client can branch on it without parsing.
 
-The recommend/events/churn endpoints currently return `503` with a milestone
-message. The schemas are final; implementations land in M3, M5, and M7.
+Errors: `401`/`403` for auth, `404` for an unknown seed item, `422` for validation, `429` with `Retry-After` when rate limited, and `503` only when every tier failed (`meta.source: "none"`). Interactive OpenAPI docs are served at `/docs`; a summary lives in `docs/api.md`.
 
 ## Embedding pipeline and index lifecycle
 
@@ -268,6 +285,7 @@ message. The schemas are final; implementations land in M3, M5, and M7.
 - **Pre-commit validation.** Every batch is checked for dtype, rank, row count, dimension, finiteness, unique ids, and L2 normalization before anything is written.
 - **Deterministic by design.** Pinned model version, fixed preprocessing (`PREPROCESSING_VERSION`), stable item ordering, and pinned thread settings. The same catalog snapshot and model version produce the same embeddings. See [`docs/embedding-pipeline.md`](docs/embedding-pipeline.md) for the full three-tier contract.
 - **Blue/green index swap.** A new index version is built next to the live one, evaluated against the golden set, and promoted by switching the active-version pointer. The previous version is kept for instant rollback. Index identity is content-addressed (`idx-<sha8>` over seven inputs; ADR-0007) so a rebuild with the same inputs is a no-op.
+- **Active index caching.** The active index version and the pgvector extension version are read once at startup and refreshed on a 30 s timer (ADR-0015 amendment). The request path never queries `index_registry`; the versions travel into the pipeline as arguments.
 
 ```bash
 # Produce or refresh the ONNX artifact (skips if the SHA already matches).
@@ -292,15 +310,19 @@ goes to stderr as JSON lines and can be silenced with `--quiet`. Exit codes:
 ## Retrieval, re-ranking, and fallback
 
 - **Retrieval.** pgvector HNSW with cosine distance on normalized embeddings. Filtered queries use `hnsw.iterative_scan = 'strict_order'` with a bounded `hnsw.max_scan_tuples` on pgvector 0.8+; older versions over-fetch by 4× and log a per-invocation warning. Filters go through a `FILTER_FIELDS` allowlist (`category`, `brand`, `language`) and parameterized queries, never string-built SQL. Backend identity and the filter strategy are in ADR-0007 and ADR-0008.
-- **Re-ranking.** `score = w_sim * similarity + w_pop * popularity + w_rec * recency_decay`, followed by MMR for diversity. Weights live in config, and each configuration is an experiment arm. Ships in M3; an empty `Reranker` protocol is already in place (ADR-0005).
-- **Fallback chain.**
+- **Re-ranking.** `score = w_sim * similarity + w_pop * popularity + w_rec * recency_decay`, followed by MMR for diversity. Weights live in `config/hot.yaml`, and each configuration is an experiment arm. The production default is the blend without MMR until MMR is proven (ADR-0016).
+- **Cache-aside.** The cache stores retrieval *candidates* (item id, similarity, popularity, age_days) keyed on the active `index_version`, the endpoint, the filters, and the deduplicated seed set, at `cache_k_max` candidates per entry (default 100) sliced to the request's `k`. A hot-reload of rerank weights does not invalidate entries; an index swap does. MMR-enabled requests skip the cache in M3.6 (their candidates carry a 384-float vector per row) with a documented target design (ADR-0015 amendment).
+- **Fallback chain (ADR-0020).** Four tiers plus 503:
 
-| Situation | Behavior | `meta.source` |
+| Tier | `meta.source` | Served when |
 |---|---|---|
-| Cache hit | Serve from Redis | `cache` |
-| Redis unavailable | Bypass the cache; a circuit breaker prevents repeated timeouts | `ann` |
-| ANN timeout, index or DB unavailable | Popularity-ranked items within the requested filters | `fallback` |
-| Cold-start user (no seed items) or item without an embedding | Popularity and recency within the filters | `fallback` |
+| 1 | `cache` | A cache hit for the exact request. The reranker still runs, so a config change takes effect on the next request. |
+| 2 | `ann` | The filtered ANN query on the active index returns within the timeout and the re-ranker produces a list. |
+| 3 | `fallback_ann` | The ANN path failed or timed out, but the database is reachable. A pre-computed popular list is read from `popularity_snapshot`, filtered, and returned. |
+| 4 | `fallback_cached` | The database is unreachable. The same list, held in process memory and loaded from disk at startup, is filtered in memory and returned. |
+| 5 | `none` (503) | Every tier produced an empty list or raised. |
+
+Client errors — `empty_seeds` and `all_seeds_missing` — never enter the chain: a 400/404 must not be turned into a popular list.
 
 ## Offline evaluation
 
@@ -319,22 +341,22 @@ Results (measured on the sample catalog, 200 items, k=10; the `evaluation gate` 
 | Exact kNN | 0.886 | 0.893 | 0.967 | 1.000 |
 | pgvector HNSW | 0.886 | 0.893 | 0.967 | 1.000 |
 | FAISS HNSW (benchmark) | 0.886 | 0.893 | 0.967 | 1.000 |
-| pgvector HNSW + re-ranker | TBD (M3) | TBD (M3) | TBD (M3) | — |
+| pgvector HNSW + re-ranker | TBD (M4) | TBD (M4) | TBD (M4) | — |
 
 Reading the table:
 
 - **pgvector HNSW matches exact kNN exactly** on this catalog: same top-10 for every query, so ANN fidelity is 1.000. This is the backend-agreement property that ADR-0012 requires, confirmed on the real index.
 - **The embedding model is roughly eight times better than random** on Recall@10 and much further ahead on MRR. The sample catalog's topic clusters are what the model is expected to find; the numbers say it does.
-- **Synthetic popularity is worse than random here** — a property of the placeholder, not of popularity as a signal. The `PopularityProvider` interface (ADR-0009 § 4) is the seam M5 will swap for an event-based provider whose distribution actually resembles popularity.
+- **Synthetic popularity is worse than random here** — a property of the placeholder, not of popularity as a signal. The `PopularityProvider` interface (ADR-0009 § 4) is the seam M5 will swap for an event-based provider whose distribution actually resembles popularity. The M3.4 arms in the CI report sit in the `informational` list for that reason; only `provider_missing_rate_*` gates them.
 - **Seeds are excluded from retrieved results** before metrics are computed. Without this, the seeds occupy ranks 1..N of every query (they are the nearest neighbours of their own mean) and MRR collapses to `1/(n_seeds + 1)` regardless of model quality.
-- **FAISS is a benchmark, not a serving path.** Its row matches exact kNN on this catalog because HNSW is fully connected at every `ef_search` in the benchmark's grid; the recall/latency trade-off shows up on larger catalogs. The latency comparison between exact kNN and FAISS is in the Performance section; the retrieval-quality numbers here are the same because fidelity is 1.0000 at this scale.
+- **FAISS is a benchmark, not a serving path.** Its row matches exact kNN on this catalog because HNSW is fully connected at every `ef_search` in the benchmark's grid; the recall/latency trade-off shows up on larger catalogs.
 
 Thresholds are in `evaluation/thresholds.yaml`; every value above is at or above its threshold and its absolute floor (ADR-0010).
 
 ## A/B testing
 
-- **Assignment.** Stateless and deterministic: `bucket = sha256(f"{experiment_salt}:{user_id}") % 10_000`, mapped to variants by traffic allocation. Python's built-in `hash()` is deliberately not used because it is randomized per process. A per-experiment salt keeps assignments independent across experiments.
-- **Logging.** Exposure events (when a user is actually served a variant) and outcome events (`click`, `conversion`) are stored in PostgreSQL with `experiment`, `variant`, and `request_id`.
+- **Assignment.** Stateless and deterministic: `bucket = sha256(f"{effective_salt}:{user_id}") % 10_000`, mapped to variants by traffic allocation, with `effective_salt = f"{APP_ENV}:{experiment.salt}"`. Python's built-in `hash()` is deliberately not used because it is randomized per process. A per-experiment salt keeps assignments independent across experiments.
+- **Exposure logging.** An exposure row is written for every served variant whose assignment says `log_exposure = true`. The write is idempotent on `sha256(f"exposure:{experiment}:{request_id}")`. Stopped and kill-switched experiments produce an assignment but do not write.
 - **Planning.** A sample-size calculator takes the baseline rate, minimum detectable effect, significance level, and power.
 - **Validity checks.** A sample ratio mismatch (SRM) check using a chi-square test (alert at p < 0.001) runs before any result is read.
 - **Analysis.** Two-proportion z-test for rates, Welch's t-test for continuous metrics, confidence intervals, and Holm correction across multiple metrics. Analysis is fixed-horizon: results are read only after the planned sample size is reached.
@@ -347,11 +369,11 @@ python -m recsys.experiments.analyze --experiment rerank_mmr
 
 ## Observability
 
-- **Metrics** (Prometheus, `/metrics`): `recsys_request_duration_seconds` (histogram by route, source, and status), `recsys_cache_requests_total{result}`, `recsys_fallback_total{reason}`, `recsys_errors_total{type}`, `recsys_embedding_drift_score`, and `recsys_active_index_info{index_version,model_version}`. Histogram buckets include 0.2 s so the latency target is directly measurable.
+- **Metrics** (Prometheus, `/metrics`): `recsys_request_duration_seconds` (histogram by route, source, and status), `recsys_cache_requests_total{result}`, `recsys_cache_skip_total{reason}`, `recsys_fallback_total{reason}`, `recsys_errors_total{type}`, `recsys_circuit_breaker_state{name}`, `recsys_active_index_info{index_version,model_version}`, `recsys_active_index_staleness_seconds`, `recsys_active_index_refresh_failures_total`, and `recsys_embedding_drift_score`. Histogram buckets include 0.2 s so the latency target is directly measurable.
 - **p95 query:** `histogram_quantile(0.95, sum by (le) (rate(recsys_request_duration_seconds_bucket{route="/v1/recommend"}[5m])))`
 - **Tracing and logs.** OpenTelemetry spans around cache, ANN query, re-rank, and fallback. structlog JSON logs carry `request_id` and `trace_id`, with no raw PII. All logs go to **stderr**; stdout is reserved for program output (the pipeline's JSON summary, the CLI's single-line results).
 - **Drift.** Recent query and item embeddings are compared with a reference window using centroid cosine shift and PSI over the top PCA components. *(M4)*
-- **Alerts.** p95 > 200 ms for 10 minutes; 5xx rate > 1% for 5 minutes; sustained fallback-rate spike; sharp drop in cache hit rate; drift score above threshold; SRM detected in a running experiment. *(M4)*
+- **Alerts.** p95 > 200 ms for 10 minutes; 5xx rate > 1% for 5 minutes; sustained fallback-rate spike; sharp drop in cache hit rate; drift score above threshold; SRM detected in a running experiment; active-index staleness above twice the refresh interval. *(M4)*
 - **Dashboards.** Grafana JSON in `dashboards/` (service health, cache and fallback, drift, experiments). *(M4)*
 
 The full metric and log-field contract — including cardinality guardrails and forbidden log fields — lives in [`docs/contracts.md`](docs/contracts.md) § 4.
@@ -398,28 +420,30 @@ A separate router (`/v1/churn/*`) and package (`recsys.churn`) built on the same
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `ci.yml` | Pull request, push to `main` | Ruff, mypy, test-marker discipline; unit tests on a matrix of 3.11 and 3.12; integration tests against PostgreSQL (pgvector) and Redis service containers; a dedicated encoder job that runs ONNX parity and the full three-tier determinism contract; a dedicated evaluation job that builds an index and runs `make eval`, uploading the report as a build artifact; Docker build and smoke test of `/healthz`, `/readyz`, `/metrics` |
+| `ci.yml` | Pull request, push to `main` | Ruff, mypy, test-marker discipline; unit tests on a matrix of 3.11 and 3.12; integration tests against PostgreSQL (pgvector) and Redis; a dedicated encoder job that runs ONNX parity and the full three-tier determinism contract; a dedicated evaluation job that builds an index and runs `make eval`, uploading the report as a build artifact; Docker build and smoke test of `/healthz`, `/readyz`, `/metrics` |
 | `cd.yml` | Push to `main` | Build and push the image (tagged with the git SHA), deploy to staging, run smoke tests and the eval gate, promote to production after approval, auto-rollback if readiness or SLO checks fail *(M6)* |
 | `security.yml` | Pull request, nightly | Trivy scans (filesystem and image), dependency review *(M8)* |
 
-- **Image.** Multi-stage Dockerfile; builder installs into a virtualenv, runtime copies only the virtualenv and runs as uid 1000 `recsys`. `docker-compose.yml` is for local development only.
+- **Docker Hub authentication.** The three Docker-dependent jobs (`test-integration`, `evaluation`, `docker-build`) authenticate to Docker Hub before pulling. An anonymous pull rate limit (100 / 6 h / IP) is not enough for a busy CI queue; an authenticated account raises it to 200 / 6 h. Service containers cannot use `docker/login-action` (they pull before any step runs), so the integration and evaluation jobs start PostgreSQL and Redis with explicit `docker run` after the login step.
+- **Image.** Multi-stage Dockerfile; builder installs into a virtualenv, runtime copies only the virtualenv and runs as uid 1000 `recsys`.
 - **Orchestration.** Rolling updates with readiness probes (`deploy/k8s`). Terraform (`deploy/terraform`) is optional.
 - **Rollback.** Code rollback redeploys the previous image tag. Embedding-run rollback is a pointer swap in `artifacts/embeddings/current`. Index rollback is independent (`make index-rollback`).
 - **Dependencies.** Dependabot is configured in `.github/dependabot.yml` *(M8)*.
 
 ## Security
 
-- Authentication via API key (`X-API-Key`) or JWT; privileged operations require an admin scope.
-- Redis-backed rate limiting per key, degrading to a per-instance limiter if Redis is down.
+- Authentication via API key (`X-API-Key`, Argon2id-hashed in prod) or JWT; privileged operations require an admin scope (ADR-0013).
+- Redis-backed rate limiting per key, degrading to a per-instance limiter if Redis is down (ADR-0014).
 - Strict Pydantic validation: bounded `k`, bounded list sizes, and an allowlist of filter fields.
 - Filter values always reach SQL as parameters; the field set is fixed by `FILTER_FIELDS` (ADR-0008).
+- User ids in events and exposures are stored as HMAC-SHA256 under a versioned salt; the raw id never reaches storage, logs, or metrics (ADR-0018).
 - Secrets only through environment variables; least-privilege database user.
 - Trivy scans in CI and automated dependency updates through Dependabot.
 - Logs contain no raw PII.
 
 ## Development and testing
 
-Requires Python 3.11+ and GNU Make. Docker is optional and only needed for the full local stack.
+Requires Python 3.11+ and GNU Make. PostgreSQL 16 with pgvector and Redis are needed for the served path and the integration tests.
 
 ```bash
 make install-dev          # pip install -e ".[dev]" — the full local environment
@@ -458,12 +482,14 @@ Extras are provided so CI and local development do not pay for what they do not 
 | `[export]` | sentence-transformers + onnx. Pulls torch. | Producing a new ONNX artifact; the encoder parity test. |
 | `[pipeline]` | `[inference]` + pyarrow. | The batch/incremental embedding pipeline and artifact I/O. |
 | `[db]` | SQLAlchemy + psycopg + Alembic + pgvector. | Migrations, the pgvector backend, the build/promote CLIs. |
+| `[cache]` | redis-py (async). | The cache store, the rate limiter, and the readiness check. |
+| `[auth]` | passlib[argon2] + PyJWT. | API key and JWT validation. |
+| `[config]` | pyyaml. | Loading `config/hot.yaml` and `experiments.yaml`. |
 | `[bench]` | faiss-cpu. | `scripts/bench_faiss.py` only. Never a production dependency. |
 | `[dev]` | Superset of `[dev-lite]` plus embeddings, experiments, churn, bench, and load. | Full local development. |
 
 | Command | What it does |
 |---|---|
-| `make up` / `make down` | Start / stop the full local stack (Docker Compose) *(M3)* |
 | `make fmt` | Ruff auto-fix and format |
 | `make lint` | Ruff check and format-check, no modifications |
 | `make typecheck` | mypy in strict mode |
@@ -477,6 +503,7 @@ Extras are provided so CI and local development do not pay for what they do not 
 | `make migrate` | Apply Alembic migrations (reads `DATABASE_URL` from the environment) |
 | `make index-build` | Build an index from the active embedding run |
 | `make index-promote VERSION=<v>` | Promote an index; `make index-rollback` reverts to the most recent retired one |
+| `make popularity-refresh` | Refresh the popularity snapshot and rewrite the tier-4 cache file |
 | `make bench-faiss` | Run the FAISS benchmark and render the Markdown companion (ADR-0011) |
 | `make seed` | Load the sample catalog; `make seed-synthetic N=100000` generates one *(M4)* |
 | `make load-test` | Locust load test against the local stack *(M4)* |
@@ -485,11 +512,11 @@ Extras are provided so CI and local development do not pay for what they do not 
 
 Test layers:
 
-- `tests/unit` covers pure logic: preprocessing rules, encoder protocol conformance, artifact primitives (locking, atomic writes, config hashing, run-id allocation, state validation, Parquet I/O), catalog loading, mode planning, retrieval metrics, golden set loading, evaluation thresholds, evaluation runner, and the retrieval backends' behavior with fake connections.
-- `tests/integration` runs against real services: PostgreSQL (pgvector) and Redis; ONNX-vs-reference encoder parity; the three-tier determinism contract; the index lifecycle (build, promote, rollback, incomplete-build refusal, at-most-one-active invariant); and the backend-agreement regression test from ADR-0012. These skip cleanly unless the relevant env vars or extras are present.
+- `tests/unit` covers pure logic: preprocessing rules, encoder protocol conformance, artifact primitives (locking, atomic writes, config hashing, run-id allocation, state validation, Parquet I/O), catalog loading, mode planning, retrieval metrics, golden set loading, evaluation thresholds, evaluation runner, the retrieval backends with fake connections, the auth dependency against a minimal FastAPI app, the readiness aggregate, the fallback chain with a monkeypatched reader, the experiment runtime, and the recommend handler's mapping from a pipeline outcome to an HTTP response.
+- `tests/integration` runs against real services: PostgreSQL (pgvector) and Redis; ONNX-vs-reference encoder parity; the three-tier determinism contract; the index lifecycle (build, promote, rollback, incomplete-build refusal, at-most-one-active invariant); the backend-agreement regression test from ADR-0012; auth wiring across every protected endpoint; and an end-to-end M3 test that boots the app factory, middleware stack, auth, connection pool, readiness checks, and the recommend / events / similar handlers against a database with migrations applied and no active index. These skip cleanly unless the relevant env vars or extras are present.
 - `tests/load` holds the Locust (or k6) scenarios for the served-path latency target *(M4)*.
 
-Pull requests must pass CI. Architectural changes need an ADR in `docs/adr/` — see the [ADR index](docs/adr/README.md) for the convention and the **twelve accepted records** covering M0 through M2 (pgvector as default, ONNX Runtime for inference, plain Python CLI for the pipeline, versioned runs with an atomic current pointer, M2 scope, the pgvector schema, index identity, filter strategy, golden set and metrics, evaluation thresholds, FAISS benchmark methodology, and backend abstraction).
+Pull requests must pass CI. Architectural changes need an ADR in `docs/adr/` — see the [ADR index](docs/adr/README.md) for the convention and the **twenty-five accepted records** covering M0 through M3 (pgvector as default, ONNX Runtime for inference, plain Python CLI for the pipeline, versioned runs with an atomic current pointer, M2 scope, the pgvector schema, index identity, filter strategy, golden set and metrics, evaluation thresholds, FAISS benchmark methodology, backend abstraction, authentication, rate limiting, the cache and circuit breaker, the re-ranker composition, experiment assignment, event ingestion, the readiness contract, the five-tier fallback chain, the observability contract, config management, deployment, SLOs, and the development environment).
 
 ## Design decisions and trade-offs
 
@@ -502,11 +529,13 @@ Pull requests must pass CI. Architectural changes need an ADR in `docs/adr/` —
 | Versioned runs with an atomic `current` pointer | A crash cannot leave a state file pointing at a missing artifact; rollback is a pointer swap | Old runs accumulate on disk until a prune target is added |
 | Content-addressed `index_version` (`idx-<sha8>`) | A rebuild with the same inputs is a no-op; a change to any build input produces a different id | An operator changing a build parameter must publish the new id; a rebuild is required |
 | Seeds excluded from retrieved results | A recommender does not recommend what the user already has; without this, MRR collapses to `1/(n_seeds+1)` | Over-fetch by `k + len(seeds)` and filter in the caller; the backend protocol stays small |
-| Redis cache keyed by index version and variant | Lower p95 for repeated queries; swaps and A/B arms never serve stale or mixed results | Staleness within the TTL; one more moving part (bypassed on failure) |
-| Fallback instead of failing | Availability over freshness | Lower relevance while degraded, tracked through fallback rate and guardrails |
+| Cache stores retrieval candidates, not responses | A hot-reload of rerank weights must not invalidate every entry; only index swaps should | Cache hits still pay the re-rank cost. A cache miss stores a `k_max`-sized candidate window (100), so a `k=5` request retrieves more than it strictly needs; `cache_k_max` is tunable |
+| Redis cache keyed by index version and endpoint | Index swaps never serve stale neighbors; the two endpoints never share entries | Staleness within the TTL; one more moving part (bypassed on failure) |
+| Fallback instead of failing | Availability over freshness; the process memory tier survives a database outage that also takes Redis down | Lower relevance while degraded, tracked through fallback rate and guardrails; a fallback response carries `null` versions rather than pretending to have a model |
 | Hash-based experiment assignment | Stateless, reproducible, consistent across instances | No dynamic re-allocation without re-bucketing users |
 | Blue/green indexes | Zero downtime and instant rollback | Roughly double the index storage during a swap |
 | Offline evaluation as a CI gate | Catches regressions before deploy | Offline metrics do not guarantee online lift, which is why A/B testing exists |
+| Async handler, one thread hop per request | The pipeline is synchronous by design (ADR-0012); wrapping each step separately pays four hops for no concurrency gain | A bounded thread pool (`CapacityLimiter`, default 20) caps throughput under load; the queue is observable, a saturated database is not |
 
 For the full reasoning behind these choices — including the alternatives that
 were considered and rejected — see the ADRs under [`docs/adr/`](docs/adr/).
