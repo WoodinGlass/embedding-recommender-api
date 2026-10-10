@@ -76,6 +76,22 @@ class _FakeOpenPool:
     closed = False
 
 
+def _patch_encoder(monkeypatch: pytest.MonkeyPatch, *, present: bool = True) -> None:
+    """Patch the encoder builder.
+
+    create_app stores the encoder in a closure variable and the
+    lifespan assigns it to app.state. Setting app.state.encoder
+    before TestClient enters the lifespan is overwritten by design
+    (the same trap the pool fake fell into in test_recommend.py).
+    """
+    import recsys.api.app as app_module
+
+    if present:
+        monkeypatch.setattr(app_module, "_build_encoder", lambda _s, _l: object())
+    else:
+        monkeypatch.setattr(app_module, "_build_encoder", lambda _s, _l: None)
+
+
 def _patch_health_checks(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -129,6 +145,7 @@ def test_readyz_reports_not_ready_without_database(
 def test_readyz_degraded_when_redis_down(monkeypatch: pytest.MonkeyPatch) -> None:
     """Required checks pass; redis fails: degraded, 200."""
     _patch_health_checks(monkeypatch, redis_ok=False)
+    _patch_encoder(monkeypatch, present=True)
 
     app = create_app(_settings())
     with TestClient(app) as c:
@@ -143,6 +160,7 @@ def test_readyz_degraded_when_redis_down(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_readyz_ready_when_all_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_health_checks(monkeypatch)
+    _patch_encoder(monkeypatch, present=True)
 
     app = create_app(_settings())
     with TestClient(app) as c:
@@ -154,12 +172,17 @@ def test_readyz_ready_when_all_pass(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_readyz_encoder_not_required_in_dev(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_health_checks(monkeypatch)
+    # Encoder absent: its check reports ok=false but required=false
+    # (dev); the aggregate is degraded, not not_ready.
+    _patch_encoder(monkeypatch, present=False)
 
     app = create_app(_settings())
     with TestClient(app) as c:
         app.state.db_pool = _FakeOpenPool()
         r = c.get("/readyz")
+    # Degraded (encoder optional and absent), not not_ready.
     assert r.status_code == 200
+    assert r.json()["status"] == "degraded"
     assert r.json()["checks"]["encoder"]["required"] is False
 
 
